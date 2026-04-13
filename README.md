@@ -103,7 +103,7 @@ For managed fleets, bake the enrollment token and controller URL into your MDM c
 - **Never captures**: keystrokes, screen content, file contents, email/messages, browsing URLs, personal communications
 - Runs on-device AI inference — raw observations never leave the machine
 - Uploads only aggregated metrics to your controller
-- Three deployment modes based on system RAM: Observe (≤8GB, heuristic-only), Analyze (16GB, local model), Interpret (32GB+, full vision-language inference)
+- Three deployment modes based on system RAM: Mode 1 — Observe (end-of-day LLM summary), Mode 2 — Analyze (16GB+, continuous LLM summarization), Mode 3 — Interpret (32GB+ GPU, continuous LLM interpretation with vision)
 
 ---
 
