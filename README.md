@@ -12,14 +12,20 @@ In the F7 Controller dashboard, go to **Settings → Enrollment** and create a t
 
 ### 2. Download the Installer
 
-| Platform | File | Architecture |
-|----------|------|-------------|
-| **macOS (Apple Silicon)** | `fseven-agent-v{version}-aarch64-apple.pkg` | M1/M2/M3/M4 |
-| **macOS (Intel)** | `fseven-agent-v{version}-x86_64-apple.pkg` | x86_64 |
-| **Windows** | `fseven-agent-v{version}-x86_64.msi` | x86_64 |
-| **Linux** | `fseven-agent-v{version}-x86_64-linux.tar.gz` | x86_64 |
+> **Current release: v0.1.0.** At present only the **macOS Apple Silicon** installer
+> (`fseven-agent-v0.1.0-aarch64-apple.pkg`) is published in this repository.
+> Windows (MSI), macOS Intel, and Linux tarball builds are on the near-term release
+> roadmap and will appear under future `v<version>/` directories as the per-platform
+> CI pipelines come online (see [Adding a New Release](#adding-a-new-release)).
 
-Download the latest version from the [`v0.2.0/`](v0.2.0/) directory, or use the download links in your Controller dashboard under **Settings → Enrollment**.
+| Platform | File | Architecture | Status |
+|----------|------|-------------|--------|
+| **macOS (Apple Silicon)** | `fseven-agent-v{version}-aarch64-apple.pkg` | M1/M2/M3/M4 | ✅ Available in `v0.1.0/` |
+| **macOS (Intel)** | `fseven-agent-v{version}-x86_64-apple.pkg` | x86_64 | 🚧 Planned |
+| **Windows** | `fseven-agent-v{version}-x86_64.msi` | x86_64 | 🚧 Planned |
+| **Linux** | `fseven-agent-v{version}-x86_64-linux.tar.gz` | x86_64 | 🚧 Planned |
+
+Download the latest version from the [`v0.1.0/`](v0.1.0/) directory, or use the download links in your Controller dashboard under **Settings → Enrollment**.
 
 ### 3. Install & Enroll
 
@@ -43,7 +49,7 @@ sudo launchctl load /Library/LaunchDaemons/ai.fseven.agent.plist
 
 ```powershell
 # Silent install with enrollment token and controller URL:
-msiexec /i fseven-agent-v0.2.0-x86_64.msi /quiet `
+msiexec /i fseven-agent-v0.1.0-x86_64.msi /quiet `
   ENROLLMENT_TOKEN="YOUR_TOKEN_HERE" `
   CONTROLLER_URL="https://your-controller.example.com"
 ```
@@ -53,8 +59,8 @@ Or double-click the MSI and enter the token and controller URL when prompted.
 #### Linux
 
 ```bash
-tar xzf fseven-agent-v0.2.0-x86_64-linux.tar.gz
-cd fseven-agent-v0.2.0
+tar xzf fseven-agent-v0.1.0-x86_64-linux.tar.gz
+cd fseven-agent-v0.1.0
 
 # Edit config with your token and controller URL
 cat > config/agent-config.toml << 'EOF'
