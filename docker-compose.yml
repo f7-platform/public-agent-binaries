@@ -1,0 +1,124 @@
+# docker-compose.yml — Unified fseven-controller deployment
+#
+# Per PROPOSAL-community-deployment §B1 this is the single compose file
+# for every deployment shape. Pick a profile to select topology:
+#
+#   docker compose --profile community up -d    # default for self-hosters:
+#                                                  postgres + controller
+#   docker compose --profile prod      up -d    # cloud / on-prem + OpenFGA
+#   docker compose --profile dev       up -d    # local dev: postgres +
+#                                                  OpenFGA + adminer. The
+#                                                  controller runs from
+#                                                  `cargo run` on the host.
+#
+# Environment (typically written to `.env` by install.sh / install.ps1):
+#   POSTGRES_PASSWORD           — required for prod/community; dev default
+#                                 is "devpassword". install.sh generates
+#                                 a strong password on first run.
+#   ADMIN_API_KEY               — required when the controller service runs
+#   CONTROLLER_JWT_PRIVATE_KEY  — optional (controller generates on boot
+#                                 if unset)
+#   CONTROLLER_IMAGE            — image reference (default pulls from GHCR)
+#   PORT                        — host port for the controller (default 8080)
+#   DEPLOYMENT_MODE             — "Community" | "Cloud". install.sh writes
+#                                 Community; cloud operators set Cloud.
+
+services:
+  # Postgres — used by every profile. Community + prod require a strong
+  # password (install.sh generates one); dev keeps a weak default so
+  # `cargo run` works out of the box.
+  postgres:
+    image: postgres:16-alpine
+    container_name: fseven-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: seven
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-devpassword}
+      POSTGRES_DB: seven_controller
+    ports:
+      # Bind to loopback by default — community deployments don't need
+      # remote DB access. Operators who do can override with
+      # POSTGRES_BIND=0.0.0.0 in .env.
+      - "${POSTGRES_BIND:-127.0.0.1}:5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U seven -d seven_controller"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # Controller — runs in containerised deployments (community, prod).
+  # Intentionally NOT in `dev`: dev developers run `cargo run` on the host
+  # to get hot-reload + native debugger.
+  controller:
+    image: ${CONTROLLER_IMAGE:-ghcr.io/f7-platform/public-agent-binaries/controller:latest}
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: fseven-controller
+    restart: unless-stopped
+    profiles: [community, prod]
+    ports:
+      - "${PORT:-8080}:8080"
+    environment:
+      HOST: "0.0.0.0"
+      PORT: "8080"
+      DEPLOYMENT_MODE: "${DEPLOYMENT_MODE:-Community}"
+      DATABASE_URL: "postgres://seven:${POSTGRES_PASSWORD:-}@postgres:5432/seven_controller"
+      OPENFGA_API_URL: "${OPENFGA_API_URL:-}"
+      DASHBOARD_DIR: "/app/dashboard/dist"
+      KNOWLEDGE_MODELS_DIR: "/app/knowledge-models"
+      MODEL_STORAGE_DIR: "/app/model-storage"
+      RUST_LOG: "${RUST_LOG:-info,fseven_controller=info,tower_http=info}"
+      ADMIN_API_KEY: "${ADMIN_API_KEY:-}"
+      CONTROLLER_JWT_PRIVATE_KEY: "${CONTROLLER_JWT_PRIVATE_KEY:-}"
+    volumes:
+      - model-storage:/app/model-storage
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  # OpenFGA — only enterprise / cloud + local dev profiles. The community
+  # profile uses the in-process SingleOrgAuthorizer; it neither needs
+  # nor starts OpenFGA. See §G4 (single-code-path: authorizer interface,
+  # not conditional compose).
+  openfga:
+    image: openfga/openfga:v1.8
+    container_name: fseven-openfga
+    restart: unless-stopped
+    command: run
+    profiles: [prod, dev]
+    environment:
+      OPENFGA_DATASTORE_ENGINE: postgres
+      OPENFGA_DATASTORE_URI: "postgres://seven:${POSTGRES_PASSWORD:-devpassword}@postgres:5432/seven_controller"
+      OPENFGA_LOG_LEVEL: "info"
+      OPENFGA_PLAYGROUND_ENABLED: "true"
+    ports:
+      - "${OPENFGA_BIND:-127.0.0.1}:8082:8080"
+      - "${OPENFGA_BIND:-127.0.0.1}:8083:8081"
+      - "${OPENFGA_BIND:-127.0.0.1}:3002:3000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    # The OpenFGA image is distroless (no shell/nc). Health is verified
+    # externally by scripts/dev.sh polling http://localhost:8082/healthz.
+    healthcheck:
+      disable: true
+
+  # Adminer — local-developer convenience only. Never enabled in
+  # community or prod profiles.
+  adminer:
+    image: adminer:4
+    container_name: fseven-adminer
+    restart: unless-stopped
+    profiles: [dev]
+    ports:
+      - "${ADMINER_BIND:-127.0.0.1}:8081:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+volumes:
+  pgdata:
+  model-storage:

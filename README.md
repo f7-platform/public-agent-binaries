@@ -1,152 +1,177 @@
-# F7 Agent — Download & Install
+# fseven — Install & Binaries
 
-Pre-built FSEVEN Agent binaries for all supported platforms.
+Public distribution point for fseven: install scripts, Docker Compose file, controller container image index, and agent binaries for all supported platforms.
+
+Source code for the controller and agent is hosted in private repositories; this repo is the single public surface users interact with.
 
 ---
 
-## Quick Start (IT Admins)
+## Quick Start — Controller (self-hosted)
 
-### 1. Get Your Enrollment Token
+Installs PostgreSQL + the fseven controller with Docker Compose. No secrets required up front; the installer generates a strong `POSTGRES_PASSWORD` and `ADMIN_API_KEY` on first run and writes them to `.env`.
 
-In the F7 Controller dashboard, go to **Settings → Enrollment** and create a token. Copy it — you'll need it during install. Tokens are time-limited (typically 24–72 hours) and can be single-use or multi-use.
+### macOS / Linux
 
-### 2. Download the Installer
+```bash
+curl -fsSL https://raw.githubusercontent.com/f7-platform/public-agent-binaries/main/install.sh | bash
+```
 
-> **Current release: v0.1.0.** At present only the **macOS Apple Silicon** installer
-> (`fseven-agent-v0.1.0-aarch64-apple.pkg`) is published in this repository.
-> Windows (MSI), macOS Intel, and Linux tarball builds are on the near-term release
-> roadmap and will appear under future `v<version>/` directories as the per-platform
-> CI pipelines come online (see [Adding a New Release](#adding-a-new-release)).
+### Windows (PowerShell 5.1+ or 7+)
 
-| Platform | File | Architecture | Status |
-|----------|------|-------------|--------|
-| **macOS (Apple Silicon)** | `fseven-agent-v{version}-aarch64-apple.pkg` | M1/M2/M3/M4 | ✅ Available in `v0.1.0/` |
-| **macOS (Intel)** | `fseven-agent-v{version}-x86_64-apple.pkg` | x86_64 | 🚧 Planned |
-| **Windows** | `fseven-agent-v{version}-x86_64.msi` | x86_64 | 🚧 Planned |
-| **Linux** | `fseven-agent-v{version}-x86_64-linux.tar.gz` | x86_64 | 🚧 Planned |
+```powershell
+irm https://raw.githubusercontent.com/f7-platform/public-agent-binaries/main/install.ps1 | iex
+```
 
-Download the latest version from the [`v0.1.0/`](v0.1.0/) directory, or use the download links in your Controller dashboard under **Settings → Enrollment**.
+When the bootstrap banner prints, open http://localhost:8080 and complete setup.
 
-### 3. Install & Enroll
+### Flags
+
+| Flag (sh / ps1) | Default | Purpose |
+|---|---|---|
+| `--dir <path>` / `-InstallDir <path>` | `./fseven` | Install directory (holds `.env`, `docker-compose.yml`) |
+| `--image <ref>` / `-Image <ref>` | `ghcr.io/f7-platform/public-agent-binaries/controller:latest` | Override controller image |
+| `--port <n>` / `-Port <n>` | `8080` | Host port |
+| `--with-agent` / `-WithAgent` | prompt | Also install the agent on this host (non-interactive opt-in) |
+| `--no-agent` / `-NoAgent` | — | Skip the agent-install prompt |
+
+### Requirements
+
+- Docker Desktop (macOS / Windows) or Docker Engine (Linux) with Compose v2
+- Loopback port 8080 free (or pass `--port`)
+
+---
+
+## Quick Start — Agent (endpoints)
+
+Agents enroll into a running controller via a single-use token minted in the dashboard under **Settings → Enrollment**.
+
+### 1. Get a token
+
+Dashboard → **Settings → Enrollment → New token**. Copy the token value.
+
+### 2. Download + install
+
+Pick your platform from the [latest release](https://github.com/f7-platform/public-agent-binaries/releases/latest):
+
+| Platform | File |
+|---|---|
+| macOS Apple Silicon | `fseven-agent-aarch64-apple.pkg` |
+| macOS Intel         | `fseven-agent-x86_64-apple.pkg` |
+| Windows x86_64      | `fseven-agent-x86_64-windows.msi` |
+| Linux x86_64        | `fseven-agent-x86_64-linux.tar.gz` |
+
+File names are stable (no version suffix). The `releases/latest/download/<file>` URL always resolves to the current release.
 
 #### macOS
 
 ```bash
-# Open the PKG and follow prompts, then configure:
-sudo tee /etc/fseven/agent-config.toml << 'EOF'
-[enrollment]
+curl -fsSLo fseven-agent.pkg \
+  https://github.com/f7-platform/public-agent-binaries/releases/latest/download/fseven-agent-aarch64-apple.pkg
+
+sudo mkdir -p /etc/fseven
+sudo tee /etc/fseven/enrollment-seed.toml >/dev/null <<EOF
 enrollment_token = "YOUR_TOKEN_HERE"
-
-[controller]
-api_url = "https://your-controller.example.com"
+controller_url   = "https://your-controller.example.com"
 EOF
+sudo chmod 0600 /etc/fseven/enrollment-seed.toml
 
-# The agent starts automatically via LaunchDaemon
-sudo launchctl load /Library/LaunchDaemons/ai.fseven.agent.plist
+sudo installer -pkg fseven-agent.pkg -target /
 ```
 
 #### Windows
 
 ```powershell
-# Silent install with enrollment token and controller URL:
-msiexec /i fseven-agent-v0.1.0-x86_64.msi /quiet `
-  ENROLLMENT_TOKEN="YOUR_TOKEN_HERE" `
-  CONTROLLER_URL="https://your-controller.example.com"
-```
+$msi = "$env:TEMP\fseven-agent.msi"
+Invoke-WebRequest -UseBasicParsing `
+  -Uri  https://github.com/f7-platform/public-agent-binaries/releases/latest/download/fseven-agent-x86_64-windows.msi `
+  -OutFile $msi
 
-Or double-click the MSI and enter the token and controller URL when prompted.
+Start-Process msiexec.exe -Wait -ArgumentList @(
+  '/i', $msi, '/quiet', '/norestart',
+  'ENROLLMENT_TOKEN=YOUR_TOKEN_HERE',
+  'CONTROLLER_URL=https://your-controller.example.com'
+)
+```
 
 #### Linux
 
 ```bash
-tar xzf fseven-agent-v0.1.0-x86_64-linux.tar.gz
-cd fseven-agent-v0.1.0
+curl -fsSL \
+  https://github.com/f7-platform/public-agent-binaries/releases/latest/download/fseven-agent-x86_64-linux.tar.gz \
+  | tar -xz
+cd fseven-agent-v*
 
-# Edit config with your token and controller URL
-cat > config/agent-config.toml << 'EOF'
-[enrollment]
-enrollment_token = "YOUR_TOKEN_HERE"
-
-[controller]
-api_url = "https://your-controller.example.com"
-EOF
-
-# Install systemd service and start
-sudo cp systemd/fseven-agent.service /etc/systemd/system/
+sudo mkdir -p /etc/fseven
+sudo cp config/agent-config.toml /etc/fseven/
+# edit /etc/fseven/agent-config.toml to set enrollment_token + controller.api_url
 sudo cp bin/fseven-agent /usr/local/bin/
-sudo mkdir -p /etc/fseven && sudo cp config/agent-config.toml /etc/fseven/
+sudo cp systemd/fseven-agent.service /etc/systemd/system/
 sudo systemctl enable --now fseven-agent
 ```
 
-### 4. Verify Enrollment
+### 3. Verify
 
-On first run the agent sends an enrollment request to your controller. Once enrolled:
-- The device appears in your Controller dashboard under **Devices**
-- Credentials are stored securely in the OS keychain (macOS/Windows) or a protected file (Linux)
-- The agent begins observing and uploading telemetry automatically
-
-Check agent status:
-```bash
-# macOS
-sudo launchctl list | grep fseven
-
-# Linux
-systemctl status fseven-agent
-
-# Windows (PowerShell)
-Get-Service fseven-agent
-```
-
-### 5. MDM Deployment (Optional)
-
-For managed fleets, bake the enrollment token and controller URL into your MDM configuration profile. The agent enrolls silently with no user interaction. See `fseven-docs/docs/prd/` for MDM integration details.
+The device appears in the controller dashboard under **Devices** within a few seconds.
 
 ---
 
-## What the Agent Does
+## Release Artifacts
 
-- Observes work patterns via **metadata only**: application names, window titles, context-switch timestamps, AI tool usage
-- **Never captures**: keystrokes, screen content, file contents, email/messages, browsing URLs, personal communications
-- Runs on-device AI inference — raw observations never leave the machine
-- Uploads only aggregated metrics to your controller
-- Three deployment modes based on system RAM: Mode 1 — Observe (end-of-day LLM summary), Mode 2 — Analyze (16GB+, continuous LLM summarization), Mode 3 — Interpret (32GB+ GPU, continuous LLM interpretation with vision)
+Each release tag (`vX.Y.Z`) produces:
+
+| Artifact | Location |
+|---|---|
+| Controller container image | `ghcr.io/f7-platform/public-agent-binaries/controller:{vX.Y.Z, latest}` |
+| `release-manifest.json`    | GitHub Release assets — machine-readable index |
+| `install.sh`, `install.ps1`, `docker-compose.yml` | GitHub Release assets + `main` branch |
+| Agent installers (4)       | GitHub Release assets |
+
+### `release-manifest.json` schema
+
+```jsonc
+{
+  "schema_version": 1,
+  "version":        "v0.2.0",
+  "released_at":    "2026-04-24T12:34:56Z",
+  "controller": {
+    "image":        "ghcr.io/f7-platform/public-agent-binaries/controller:v0.2.0",
+    "image_latest": "ghcr.io/f7-platform/public-agent-binaries/controller:latest",
+    "digest":       "sha256:…"
+  },
+  "agent": {
+    "macos_aarch64":  "…/fseven-agent-aarch64-apple.pkg",
+    "macos_x86_64":   "…/fseven-agent-x86_64-apple.pkg",
+    "windows_x86_64": "…/fseven-agent-x86_64-windows.msi",
+    "linux_x86_64":   "…/fseven-agent-x86_64-linux.tar.gz"
+  },
+  "install_scripts": {
+    "sh":  "https://raw.githubusercontent.com/f7-platform/public-agent-binaries/main/install.sh",
+    "ps1": "https://raw.githubusercontent.com/f7-platform/public-agent-binaries/main/install.ps1"
+  }
+}
+```
+
+`install.sh` / `install.ps1` fetch this manifest on first run and pin the controller image to the matching `vX.Y.Z` tag; override via `FSEVEN_RELEASE_MANIFEST_URL`.
 
 ---
 
-## For Developers
+## MDM / Fleet Deployment
 
-### Repository Structure
+For managed fleets, bake `enrollment_token` and `controller_url` into your MDM configuration profile (macOS) or MSI transform (Windows). The agent enrolls silently with no user interaction.
 
-```
-v<version>/
-  fseven-agent-v<version>-x86_64.msi              # Windows x86_64
-  fseven-agent-v<version>-aarch64-apple.pkg        # macOS Apple Silicon
-  fseven-agent-v<version>-x86_64-apple.pkg         # macOS Intel
-  fseven-agent-v<version>-x86_64-linux.tar.gz      # Linux x86_64
-```
+---
 
-### Controller Integration
+## How Releases Are Produced
 
-The fseven-controller dashboard reads `AGENT_RELEASE_BASE_URL` and
-serves download links from this repository. Set:
+Releases in this repo are **fully automated** and produced by two private-repo workflows:
 
-```env
-AGENT_RELEASE_BASE_URL=https://github.com/fseven-ai/public-agent-binaries/raw/main
-```
+1. **`fseven-controller`** (`.github/workflows/release.yml`) — triggered by pushing a `vX.Y.Z` tag. Builds the controller image, pushes to `ghcr.io/f7-platform/public-agent-binaries/controller`, publishes `release-manifest.json` + install scripts, and syncs `install.sh` / `install.ps1` / `docker-compose.yml` to the `main` branch of this repo.
+2. **`fseven-agent`** (`.github/workflows/release.yml`) — triggered by the same tag. Builds PKG / MSI / tarball for each platform, renames to canonical filenames, and uploads to the same release.
 
-The controller constructs download URLs as:
-`{AGENT_RELEASE_BASE_URL}/v{version}/{filename}`
+Both workflows idempotently target the same GitHub Release, so order does not matter.
 
-### Adding a New Release
+---
 
-1. Build binaries via the `release.yml` workflow in `fseven-agent`, or locally:
-   - macOS: `./installer/macos/build-pkg.sh`
-   - Windows: `.\installer\windows\build-msi.ps1`
-   - Linux: `./installer/linux/build-tarball.sh`
-2. Copy artifacts to `v<version>/` in this repo.
-3. Commit and push.
+## Issues & Support
 
-### Automated Releases
-
-The `fseven-agent` repo's `.github/workflows/release.yml` workflow
-builds all platforms on tag push and commits artifacts here automatically.
+Report issues at https://github.com/f7-platform/public-agent-binaries/issues (this repo). Source-level issues are triaged internally.
