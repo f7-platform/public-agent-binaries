@@ -173,6 +173,39 @@ if [[ ! -f "$INSTALL_DIR/docker-compose.yml" ]]; then
   fi
 fi
 
+# ── Step 3b. Stale-volume guard ──────────────────────────────────────
+# Compose derives its project name from the install-dir basename. A
+# named volume (e.g. fseven_pgdata) that was initialized by a PREVIOUS
+# install in a different directory with the same basename will survive
+# that install's teardown and rebind here — with the old
+# POSTGRES_PASSWORD baked in. The new .env has a different password,
+# so every controller query will 500 with "password authentication
+# failed for user \"seven\"". Detect the mismatch and offer to reset.
+if [[ "$FRESH_INSTALL" == "yes" ]]; then
+  PROJECT_NAME="$(basename "$INSTALL_DIR" | tr '[:upper:]' '[:lower:]' | tr -c 'a-z0-9_-' '_')"
+  STALE_VOL="${PROJECT_NAME}_pgdata"
+  if docker volume inspect "$STALE_VOL" >/dev/null 2>&1; then
+    warn "Docker volume '$STALE_VOL' already exists from a previous install
+         but this directory has a freshly-generated POSTGRES_PASSWORD.
+         Postgres will refuse the new password and the controller will
+         fail to start."
+    if [[ -t 0 ]]; then
+      read -r -p "  Reset the stale volume now? [y/N] " reply
+      case "$reply" in
+        y|Y|yes|YES) docker volume rm "$STALE_VOL" >/dev/null \
+                     && log "Removed stale volume $STALE_VOL" \
+                     || die "Failed to remove $STALE_VOL — close other docker compose projects using it, then re-run." ;;
+        *) die "Cannot continue with stale volume + fresh .env. Re-run install.sh after:
+            docker volume rm $STALE_VOL" ;;
+      esac
+    else
+      die "Non-interactive shell — cannot prompt for volume reset.
+          Remove the stale volume explicitly, then re-run:
+            docker volume rm $STALE_VOL"
+    fi
+  fi
+fi
+
 # ── Step 4. Pull + up ────────────────────────────────────────────────
 log "Pulling latest controller image"
 if ! docker compose --profile community pull 2>&1 | tee /tmp/fseven-pull.log; then

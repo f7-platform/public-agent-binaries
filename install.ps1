@@ -113,6 +113,34 @@ if (-not (Test-Path $ComposeFile)) {
     Invoke-WebRequest -UseBasicParsing -Uri $ComposeUrl -OutFile $ComposeFile
 }
 
+# ── Step 3b. Stale-volume guard ──────────────────────────────────────
+# See install.sh for rationale: a named pgdata volume from a prior
+# install in a same-basename directory will rebind here with the old
+# password, poisoning every controller query.
+if ($FreshInstall) {
+    $ProjectName = (Split-Path $InstallDir -Leaf).ToLower() -replace '[^a-z0-9_-]', '_'
+    $StaleVol = "${ProjectName}_pgdata"
+    $volProbe = docker volume inspect $StaleVol 2>$null
+    if ($LASTEXITCODE -eq 0) {
+        Write-Warning "Docker volume '$StaleVol' already exists from a previous install but this directory has a freshly-generated POSTGRES_PASSWORD. Postgres will refuse the new password and the controller will fail to start."
+        if ([Environment]::UserInteractive -and $Host.UI.RawUI) {
+            $reply = Read-Host "  Reset the stale volume now? [y/N]"
+            if ($reply -match '^(y|Y|yes|YES)$') {
+                docker volume rm $StaleVol | Out-Null
+                if ($LASTEXITCODE -eq 0) {
+                    Write-Step "Removed stale volume $StaleVol"
+                } else {
+                    throw "Failed to remove $StaleVol — close other docker compose projects using it, then re-run."
+                }
+            } else {
+                throw "Cannot continue with stale volume + fresh .env. Re-run install.ps1 after:`n    docker volume rm $StaleVol"
+            }
+        } else {
+            throw "Non-interactive shell — cannot prompt for volume reset.`nRemove the stale volume explicitly, then re-run:`n    docker volume rm $StaleVol"
+        }
+    }
+}
+
 # ── Step 4. Pull + up ────────────────────────────────────────────────
 Write-Step "Pulling latest controller image"
 docker compose --profile community pull
