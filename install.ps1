@@ -120,40 +120,56 @@ docker compose --profile community pull
 Write-Step "Starting services (profile: community)"
 docker compose --profile community up -d
 
-# ── Step 5. Wait for bootstrap banner ────────────────────────────────
-Write-Step "Waiting for first-run bootstrap (up to 60 s)…"
-$deadline = (Get-Date).AddSeconds(60)
-$bannerLines = $null
+# ── Step 5. Wait for bootstrap to finish ─────────────────────────────
+# Poll the persisted secrets file (written as the final bootstrap step)
+# rather than grepping logs — much more reliable on slow machines.
+Write-Step "Waiting for first-run bootstrap (up to 120 s)…"
+$deadline = (Get-Date).AddSeconds(120)
+$SecretsPath = "/app/model-storage/bootstrap/secrets.env"
+$AdminEmail = $null
+$AdminPassword = $null
 while ((Get-Date) -lt $deadline) {
-    $logs = docker compose logs --no-color controller 2>$null
-    if ($logs -match 'first-run bootstrap complete') {
-        # Grab the ~6 lines around the banner for display.
-        $idx = ($logs -split "`n" | Select-String -Pattern 'first-run bootstrap complete' | Select-Object -First 1).LineNumber
-        $allLines = $logs -split "`n"
-        $start = [Math]::Max(0, $idx - 1)
-        $bannerLines = ($allLines[$start..([Math]::Min($allLines.Length - 1, $start + 7))]) -join "`n"
-        break
+    $creds = docker compose exec -T controller cat $SecretsPath 2>$null
+    if ($LASTEXITCODE -eq 0 -and $creds) {
+        $AdminEmail = ($creds -split "`n" | Where-Object { $_ -match '^FSEVEN_BOOTSTRAP_ADMIN_EMAIL=' } |
+            ForEach-Object { ($_ -split '=', 2)[1].Trim() } | Select-Object -First 1)
+        $AdminPassword = ($creds -split "`n" | Where-Object { $_ -match '^FSEVEN_BOOTSTRAP_ADMIN_PASSWORD=' } |
+            ForEach-Object { ($_ -split '=', 2)[1].Trim() } | Select-Object -First 1)
+        if ($AdminEmail -and $AdminPassword) { break }
     }
-    if (-not $FreshInstall -and ($logs -match 'Listening \(healthcheck ready\)')) {
-        break
+    if (-not $FreshInstall) {
+        $logs = docker compose logs --no-color controller 2>$null
+        if ($logs -match 'Listening \(healthcheck ready\)') { break }
     }
     Start-Sleep -Seconds 2
 }
 
-# ── Step 6. Print URLs ───────────────────────────────────────────────
+# ── Step 6. Print URLs + credentials ─────────────────────────────────
 $DashboardUrl = "http://localhost:$Port"
 Write-Host ""
 Write-Host "✓ fseven controller is running at $DashboardUrl" -ForegroundColor Green
-if ($bannerLines) {
+Write-Host ""
+if ($AdminEmail -and $AdminPassword) {
+    Write-Host "  Admin login" -ForegroundColor White
+    Write-Host "  Email:     $AdminEmail"
+    Write-Host "  Password:  $AdminPassword"
+    Write-Host "  Setup:     $DashboardUrl/setup"
     Write-Host ""
-    Write-Host $bannerLines
+    Write-Host "  (credentials also persisted inside the controller at"
+    Write-Host "   $SecretsPath — in the model-storage Docker volume)"
     Write-Host ""
-    Write-Host "Setup URL:  $DashboardUrl/setup"
-    Write-Host "(credentials also written inside the controller container at"
-    Write-Host " /app/model-storage/bootstrap/secrets.env — persisted in the"
-    Write-Host " 'model-storage' Docker volume; back it up!)"
-} else {
+    Write-Host "  -> Log in once, then rotate the password under Admin -> Profile." -ForegroundColor Yellow
+    Write-Host ""
+} elseif (-not $FreshInstall) {
     Write-Host "Dashboard:  $DashboardUrl"
+    Write-Host "(Admin credentials were printed on first run; retrieve them with:"
+    Write-Host "   docker compose exec controller cat $SecretsPath"
+    Write-Host " if you still have the model-storage volume.)"
+} else {
+    Write-Host "WARNING: Bootstrap did not complete within 120 s." -ForegroundColor Yellow
+    Write-Host "Check logs:  docker compose logs controller"
+    Write-Host "Once bootstrap finishes, get credentials with:"
+    Write-Host "   docker compose exec controller cat $SecretsPath"
 }
 
 # ── Step 7. Self-observer chaining (PR-19) ───────────────────────────

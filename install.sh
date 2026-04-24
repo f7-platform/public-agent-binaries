@@ -189,21 +189,30 @@ rm -f /tmp/fseven-pull.log
 log "Starting services (profile: community)"
 docker compose --profile community up -d
 
-# ── Step 5. Wait for bootstrap banner ────────────────────────────────
-log "Waiting for first-run bootstrap (up to 60 s)…"
-DEADLINE=$(( $(date +%s) + 60 ))
-BANNER_LINE=""
+# ── Step 5. Wait for bootstrap to finish ─────────────────────────────
+# The controller writes /app/model-storage/bootstrap/secrets.env as the
+# final step of first-run bootstrap. Polling for that file is more
+# reliable than grepping the log stream (which has a race against the
+# 60 s deadline on slow machines / fresh DB migrations).
+log "Waiting for first-run bootstrap (up to 120 s)…"
+DEADLINE=$(( $(date +%s) + 120 ))
+SECRETS_PATH="/app/model-storage/bootstrap/secrets.env"
+ADMIN_EMAIL=""
+ADMIN_PASSWORD=""
 while [[ $(date +%s) -lt $DEADLINE ]]; do
-  # `docker compose logs --no-color` streams accumulated logs to stdout.
-  if docker compose logs --no-color controller 2>/dev/null \
-       | grep -q "first-run bootstrap complete"; then
-    BANNER_LINE=$(docker compose logs --no-color controller 2>/dev/null \
-                   | grep -A 6 "first-run bootstrap complete" | tail -n 6)
-    break
+  # Read the secrets file from inside the container. Succeeds the moment
+  # bootstrap commits; exits non-zero until then.
+  if creds=$(docker compose exec -T controller cat "$SECRETS_PATH" 2>/dev/null); then
+    ADMIN_EMAIL=$(printf '%s\n' "$creds" \
+      | grep -E '^FSEVEN_BOOTSTRAP_ADMIN_EMAIL=' | cut -d= -f2- | tr -d '\r')
+    ADMIN_PASSWORD=$(printf '%s\n' "$creds" \
+      | grep -E '^FSEVEN_BOOTSTRAP_ADMIN_PASSWORD=' | cut -d= -f2- | tr -d '\r')
+    if [[ -n "$ADMIN_EMAIL" && -n "$ADMIN_PASSWORD" ]]; then
+      break
+    fi
   fi
-  # Already-bootstrapped (re-run): the banner was printed on the very
-  # first run and is not re-emitted on subsequent starts. Treat a
-  # "Listening (healthcheck ready)" line as success.
+  # Already-bootstrapped re-run: secrets.env exists from a previous run
+  # but the banner was not re-emitted. Break on "healthcheck ready".
   if [[ "$FRESH_INSTALL" == "no" ]] \
      && docker compose logs --no-color controller 2>/dev/null \
           | grep -q "Listening (healthcheck ready)"; then
@@ -212,17 +221,28 @@ while [[ $(date +%s) -lt $DEADLINE ]]; do
   sleep 2
 done
 
-# ── Step 6. Print URLs ───────────────────────────────────────────────
+# ── Step 6. Print URLs + credentials ─────────────────────────────────
 DASHBOARD_URL="http://localhost:${CONTROLLER_PORT}"
-printf '\n\033[1;32m✓\033[0m fseven controller is running at %s\n' "$DASHBOARD_URL"
-if [[ -n "$BANNER_LINE" ]]; then
-  printf '\n%s\n\n' "$BANNER_LINE"
-  printf 'Setup URL:  %s/setup\n' "$DASHBOARD_URL"
-  printf '(credentials also written inside the controller container at\n'
-  printf ' /app/model-storage/bootstrap/secrets.env — persisted in the\n'
-  printf ' `model-storage` Docker volume; back it up!)\n\n'
-else
+printf '\n\033[1;32m✓\033[0m fseven controller is running at %s\n\n' "$DASHBOARD_URL"
+if [[ -n "$ADMIN_EMAIL" && -n "$ADMIN_PASSWORD" ]]; then
+  printf '  \033[1mAdmin login\033[0m\n'
+  printf '  Email:     %s\n' "$ADMIN_EMAIL"
+  printf '  Password:  %s\n' "$ADMIN_PASSWORD"
+  printf '  Setup:     %s/setup\n' "$DASHBOARD_URL"
+  printf '\n  (credentials also persisted inside the controller at\n'
+  printf '   %s — in the model-storage Docker volume)\n\n' "$SECRETS_PATH"
+  printf '  \033[1;33m→ Log in once, then rotate the password under Admin → Profile.\033[0m\n\n'
+elif [[ "$FRESH_INSTALL" == "no" ]]; then
   printf 'Dashboard:  %s\n' "$DASHBOARD_URL"
+  printf '(Admin credentials were printed on first run; retrieve them with:\n'
+  printf '   docker compose exec controller cat %s\n' "$SECRETS_PATH"
+  printf ' if you still have the model-storage volume.)\n\n'
+else
+  # Fresh install but bootstrap did not complete within the deadline.
+  printf '\033[1;33m⚠ Bootstrap did not complete within 120 s.\033[0m\n'
+  printf 'Check logs:  docker compose logs controller\n'
+  printf 'Once bootstrap finishes, get credentials with:\n'
+  printf '   docker compose exec controller cat %s\n\n' "$SECRETS_PATH"
 fi
 
 # ── Step 7. Self-observer chaining (PR-19) ───────────────────────────
