@@ -57,10 +57,12 @@ Pick your platform from the [latest release](https://github.com/f7-platform/publ
 |---|---|
 | macOS Apple Silicon | `fseven-agent-aarch64-apple.pkg` |
 | macOS Intel         | `fseven-agent-x86_64-apple.pkg` |
-| Windows x86_64      | `fseven-agent-x86_64-windows.msi` |
+| Windows x86_64      | `fseven-agent-x86_64-windows.msi` *(pending — see Known Limitations)* |
 | Linux x86_64        | `fseven-agent-x86_64-linux.tar.gz` |
 
 File names are stable (no version suffix). The `releases/latest/download/<file>` URL always resolves to the current release.
+
+> **Known limitations (v0.2.0):** The Windows MSI is temporarily not produced — `libsqlite3-sys` + SQLCipher requires vcpkg-bundled deps on MSVC and is tracked as follow-up work. macOS PKGs and Windows MSI ship unsigned in v0.2.0 (no Apple Developer ID / Authenticode cert provisioned); Gatekeeper / SmartScreen will prompt on manual download — the silent install flow in `install.sh` / `install.ps1` is unaffected.
 
 #### macOS
 
