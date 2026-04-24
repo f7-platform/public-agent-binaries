@@ -8,8 +8,31 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 
 ### Planned
 
-- Linux `.tar.gz` and `.deb` publish plan (Sprint 5 PB-4)
 - Windows MSI Authenticode signing once Azure Code Signing cert is provisioned
+- macOS PKG Developer ID + notarization (Apple Developer ID cert pending)
+
+## [0.2.0] — 2026-04-24
+
+### Added
+
+- Controller container image at `ghcr.io/f7-platform/public-agent-binaries/controller:v0.2.0` and `:latest` (multi-arch `linux/amd64` + `linux/arm64`)
+- `docker-compose.yml`, `install.sh`, `install.ps1`, `env-required.json`, `release-manifest.json` published as Release assets
+- Agent binaries for all four platforms:
+  - `fseven-agent-aarch64-apple.pkg` (Apple Silicon)
+  - `fseven-agent-x86_64-apple.pkg` (Intel Mac)
+  - `fseven-agent-x86_64-windows.msi` (Windows)
+  - `fseven-agent-x86_64-linux.tar.gz` (Linux)
+
+### Changed
+
+- Agent + controller releases now auto-publish via GitHub Actions to this repo; no manual drops.
+- Agent binary filenames dropped the version suffix — canonical names are stable across releases (older binaries remain on historical Releases).
+
+### Infrastructure
+
+- Windows MSI now builds OpenSSL from source via `rusqlite` `bundled-sqlcipher-vendored-openssl` feature + NASM toolchain.
+- macOS Intel PKG cross-compiled on Apple Silicon runners to avoid `macos-13` queue starvation.
+- Controller image built on native `ubuntu-latest` + `ubuntu-24.04-arm` runners (no QEMU emulation).
 
 ## [0.1.0] — 2024-12
 
