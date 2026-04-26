@@ -221,7 +221,7 @@ Each release tag (`vX.Y.Z`) produces:
 
 ```jsonc
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "version":        "v0.2.0",
   "released_at":    "2026-04-24T12:34:56Z",
   "controller": {
@@ -238,13 +238,31 @@ Each release tag (`vX.Y.Z`) produces:
   "install_scripts": {
     "sh":  "https://raw.githubusercontent.com/f7-platform/public-agent-binaries/main/install.sh",
     "ps1": "https://raw.githubusercontent.com/f7-platform/public-agent-binaries/main/install.ps1"
+  },
+  "artifacts": {
+    "docker_compose": {
+      "url":    "…/docker-compose.yml",
+      "sha256": "…"
+    },
+    "install_sh": {
+      "url":    "…/install.sh",
+      "sha256": "…"
+    },
+    "install_ps1": {
+      "url":    "…/install.ps1",
+      "sha256": "…"
+    }
   }
 }
 ```
 
 `install.sh` / `install.ps1` fetch this manifest on first run and pin the
-controller image to the matching `vX.Y.Z` tag; override via
-`FSEVEN_RELEASE_MANIFEST_URL`.
+controller image to the matching `vX.Y.Z` tag. They also verify downloaded
+compose and agent installer artifacts before use. Override via
+`FSEVEN_RELEASE_MANIFEST_URL`; custom compose or agent package URLs must be
+paired with `FSEVEN_COMPOSE_SHA256`, `FSEVEN_AGENT_PKG_SHA256`, or
+`FSEVEN_AGENT_MSI_SHA256` unless a `.sha256` sidecar is published next to the
+artifact.
 
 ---
 

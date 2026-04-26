@@ -47,6 +47,44 @@ function New-Secret {
     -join ($bytes | ForEach-Object { '{0:x2}' -f $_ })
 }
 
+function Get-JsonPath($Object, [string]$Path) {
+    if (-not $Object) { return $null }
+    $value = $Object
+    foreach ($part in $Path.Split('.')) {
+        if ($null -eq $value) { return $null }
+        if ($value -is [string]) { return $null }
+        $prop = $value.PSObject.Properties[$part]
+        if (-not $prop) { return $null }
+        $value = $prop.Value
+    }
+    return $value
+}
+
+function Get-FileSha256([string]$Path) {
+    (Get-FileHash -Algorithm SHA256 -Path $Path).Hash.ToLowerInvariant()
+}
+
+function Assert-Sha256([string]$Path, [string]$Expected, [string]$Label) {
+    $normalized = $Expected -replace '^sha256:', ''
+    $normalized = $normalized.ToLowerInvariant()
+    if ($normalized -notmatch '^[0-9a-f]{64}$') {
+        throw "Invalid SHA-256 checksum for $Label"
+    }
+    $actual = Get-FileSha256 $Path
+    if ($actual -ne $normalized) {
+        throw "$Label checksum mismatch: expected $normalized, got $actual"
+    }
+    Write-Step "Verified $Label SHA-256: $actual"
+}
+
+function Get-SidecarSha256([string]$Url, [string]$Label) {
+    try {
+        $text = (Invoke-WebRequest -UseBasicParsing -Uri "$Url.sha256").Content
+        if ($text -match '([0-9A-Fa-f]{64})') { return $Matches[1] }
+    } catch {}
+    throw "No SHA-256 checksum available for $Label. Expected $Url.sha256 or release-manifest checksum metadata."
+}
+
 # ── Step 1. Preflight ────────────────────────────────────────────────
 Write-Step "fseven controller installer — checking prerequisites"
 
@@ -70,6 +108,23 @@ catch {
 New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
 Set-Location $InstallDir
 Write-Step "Install directory: $InstallDir"
+
+# ── Step 1b. Resolve release manifest (PR-21 / §D2) ──────────────────
+$ManifestUrl = if ($env:FSEVEN_RELEASE_MANIFEST_URL) { $env:FSEVEN_RELEASE_MANIFEST_URL } `
+               else { 'https://github.com/f7-platform/public-agent-binaries/releases/latest/download/release-manifest.json' }
+$script:ReleaseManifest = $null
+try {
+    $script:ReleaseManifest = (Invoke-WebRequest -UseBasicParsing -Uri $ManifestUrl).Content | ConvertFrom-Json
+} catch {
+    Write-Warn2 "Could not fetch release manifest from $ManifestUrl; remote artifacts will require explicit checksums."
+}
+if ($script:ReleaseManifest -and $Image -eq 'ghcr.io/f7-platform/public-agent-binaries/controller:latest') {
+    $resolved = Get-JsonPath $script:ReleaseManifest 'controller.image'
+    if ($resolved) {
+        $Image = [string]$resolved
+        Write-Step "Manifest-resolved controller image: $Image"
+    }
+}
 
 # ── Step 2. .env handling (idempotent per §B6) ───────────────────────
 $EnvFile = Join-Path $InstallDir '.env'
@@ -107,10 +162,19 @@ PORT=$Port
 # ── Step 3. Fetch the compose file ───────────────────────────────────
 $ComposeFile = Join-Path $InstallDir 'docker-compose.yml'
 if (-not (Test-Path $ComposeFile)) {
+    $manifestComposeUrl = Get-JsonPath $script:ReleaseManifest 'artifacts.docker_compose.url'
+    $manifestComposeSha256 = Get-JsonPath $script:ReleaseManifest 'artifacts.docker_compose.sha256'
     $ComposeUrl = if ($env:FSEVEN_COMPOSE_URL) { $env:FSEVEN_COMPOSE_URL } `
+                  elseif ($manifestComposeUrl) { [string]$manifestComposeUrl } `
                   else { 'https://raw.githubusercontent.com/f7-platform/public-agent-binaries/main/docker-compose.yml' }
+    $ComposeSha256 = if ($env:FSEVEN_COMPOSE_SHA256) { $env:FSEVEN_COMPOSE_SHA256 } `
+                     else { [string]$manifestComposeSha256 }
     Write-Step "Fetching compose file from $ComposeUrl"
     Invoke-WebRequest -UseBasicParsing -Uri $ComposeUrl -OutFile $ComposeFile
+    if (-not $ComposeSha256) {
+        Write-Fail "No SHA-256 checksum available for downloaded compose file. Use the release manifest artifacts.docker_compose.sha256 field or set FSEVEN_COMPOSE_SHA256."
+    }
+    Assert-Sha256 $ComposeFile $ComposeSha256 'compose file'
 }
 
 # ── Step 3b. Stale-volume guard ──────────────────────────────────────
@@ -257,14 +321,39 @@ function Install-FsevenAgent {
     if (-not $token) { Write-Warn2 "Empty token response — skipping"; return }
     $tokenHash = $response.token_hash
 
-    $msiUrl = if ($env:FSEVEN_AGENT_MSI_URL) { $env:FSEVEN_AGENT_MSI_URL } `
-              else { "https://github.com/f7-platform/public-agent-binaries/releases/latest/download/fseven-agent-$arch-windows.msi" }
+    $msiSha256 = if ($env:FSEVEN_AGENT_MSI_SHA256) { $env:FSEVEN_AGENT_MSI_SHA256 } else { $null }
+    if ($env:FSEVEN_AGENT_MSI_URL) {
+        $msiUrl = $env:FSEVEN_AGENT_MSI_URL
+    } else {
+        $manifestEntry = Get-JsonPath $script:ReleaseManifest 'agent.windows_x86_64'
+        if ($manifestEntry -is [string]) {
+            $msiUrl = $manifestEntry
+        } elseif ($manifestEntry) {
+            $msiUrl = [string](Get-JsonPath $script:ReleaseManifest 'agent.windows_x86_64.url')
+            if (-not $msiSha256) { $msiSha256 = [string](Get-JsonPath $script:ReleaseManifest 'agent.windows_x86_64.sha256') }
+        } else {
+            $msiUrl = "https://github.com/f7-platform/public-agent-binaries/releases/latest/download/fseven-agent-$arch-windows.msi"
+        }
+    }
     $msiTmp = Join-Path $env:TEMP "fseven-agent-$([guid]::NewGuid()).msi"
     Write-Step "Downloading agent installer: $msiUrl"
     try {
         Invoke-WebRequest -UseBasicParsing -Uri $msiUrl -OutFile $msiTmp
     } catch {
         Write-Warn2 "Agent installer download failed: $($_.Exception.Message)"
+        return
+    }
+    try {
+        if (-not $msiSha256) { $msiSha256 = Get-SidecarSha256 $msiUrl 'agent installer' }
+        Assert-Sha256 $msiTmp $msiSha256 'agent installer'
+        $sig = Get-AuthenticodeSignature -FilePath $msiTmp
+        if ($sig.Status -ne 'Valid') {
+            throw "Invalid Authenticode signature: status=$($sig.Status) message=$($sig.StatusMessage)"
+        }
+        Write-Step "Verified Authenticode signature: $($sig.SignerCertificate.Subject)"
+    } catch {
+        Write-Warn2 "Agent installer verification failed: $($_.Exception.Message) — skipping agent install"
+        Remove-Item $msiTmp -ErrorAction SilentlyContinue
         return
     }
 

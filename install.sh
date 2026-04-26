@@ -73,6 +73,87 @@ gen_secret() {
   fi
 }
 
+download_file() {
+  local url="$1" dest="$2"
+  if command -v curl >/dev/null 2>&1; then
+    curl -fsSL "$url" -o "$dest"
+  elif command -v wget >/dev/null 2>&1; then
+    wget -q "$url" -O "$dest"
+  else
+    die "Neither curl nor wget is available — cannot download $url"
+  fi
+}
+
+compute_sha256() {
+  local file="$1"
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$file" | awk '{print $1}'
+  elif command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$file" | awk '{print $1}'
+  else
+    die "No SHA-256 tool found (need sha256sum or shasum)"
+  fi
+}
+
+verify_sha256() {
+  local file="$1" expected="$2" label="$3" actual
+  expected="${expected#sha256:}"
+  expected="$(printf '%s' "$expected" | tr '[:upper:]' '[:lower:]')"
+  if [[ ! "$expected" =~ ^[0-9a-f]{64}$ ]]; then
+    die "Invalid SHA-256 checksum for $label"
+  fi
+  actual="$(compute_sha256 "$file" | tr '[:upper:]' '[:lower:]')"
+  if [[ "$actual" != "$expected" ]]; then
+    die "$label checksum mismatch: expected $expected, got $actual"
+  fi
+  log "Verified $label SHA-256: $actual"
+}
+
+manifest_get() {
+  local path="$1"
+  [[ -n "${MANIFEST_JSON:-}" ]] || return 0
+  command -v python3 >/dev/null 2>&1 || return 0
+  MANIFEST_PATH="$path" MANIFEST_JSON_INPUT="$MANIFEST_JSON" python3 - <<'PY' 2>/dev/null || true
+import json
+import os
+
+try:
+    value = json.loads(os.environ["MANIFEST_JSON_INPUT"])
+    for key in os.environ["MANIFEST_PATH"].split("."):
+        if isinstance(value, dict):
+            value = value.get(key)
+        else:
+            value = None
+        if value is None:
+            break
+    if isinstance(value, str):
+        print(value)
+except Exception:
+    pass
+PY
+}
+
+fetch_sidecar_sha256() {
+  local url="$1" label="$2" tmp checksum
+  tmp="$(mktemp)"
+  if download_file "${url}.sha256" "$tmp" 2>/dev/null; then
+    checksum="$(awk 'match($0, /[0-9A-Fa-f]{64}/) { print substr($0, RSTART, RLENGTH); exit }' "$tmp")"
+  fi
+  rm -f "$tmp"
+  if [[ -z "${checksum:-}" ]]; then
+    die "No SHA-256 checksum available for $label. Expected ${url}.sha256 or release-manifest checksum metadata."
+  fi
+  printf '%s' "$checksum"
+}
+
+verify_macos_pkg_signature() {
+  local pkg="$1"
+  if [[ "${OS_NAME:-}" == "Darwin" ]] && command -v pkgutil >/dev/null 2>&1; then
+    pkgutil --check-signature "$pkg" >/dev/null || die "macOS package signature verification failed for $pkg"
+    log "Verified macOS package signature"
+  fi
+}
+
 # ── Step 1. Preflight ────────────────────────────────────────────────
 log "fseven controller installer — checking prerequisites"
 
@@ -98,20 +179,23 @@ log "Install directory: $INSTALL_DIR"
 # ── Step 1b. Resolve release manifest (PR-21 / §D2) ──────────────────
 # The manifest is attached to the GitHub Release and lists the
 # canonical controller image tag + matching agent installer URLs for
-# this version. Falls back silently on network failure — the
-# defaults below (latest tag + public-agent-binaries "latest"
-# release) are still correct for the bleeding edge.
+# this version. Remote compose/package downloads fail closed unless
+# checksum metadata is available from the manifest, a sidecar, or an
+# explicit env override.
 MANIFEST_URL="${FSEVEN_RELEASE_MANIFEST_URL:-https://github.com/f7-platform/public-agent-binaries/releases/latest/download/release-manifest.json}"
 MANIFEST_JSON=""
 if command -v curl >/dev/null 2>&1; then
   MANIFEST_JSON="$(curl -fsSL "$MANIFEST_URL" 2>/dev/null || true)"
+elif command -v wget >/dev/null 2>&1; then
+  MANIFEST_JSON="$(wget -qO- "$MANIFEST_URL" 2>/dev/null || true)"
+fi
+if [[ -z "$MANIFEST_JSON" ]]; then
+  warn "Could not fetch release manifest from $MANIFEST_URL; remote artifacts will require explicit checksums."
 fi
 if [[ -n "$MANIFEST_JSON" ]] && command -v python3 >/dev/null 2>&1; then
   # Resolve controller image unless the user explicitly overrode it.
   if [[ "$CONTROLLER_IMAGE" == "$CONTROLLER_IMAGE_DEFAULT" ]]; then
-    resolved="$(printf '%s' "$MANIFEST_JSON" \
-                 | python3 -c 'import sys,json; print(json.load(sys.stdin)["controller"]["image"])' \
-                 2>/dev/null || true)"
+    resolved="$(manifest_get controller.image)"
     if [[ -n "$resolved" ]]; then
       CONTROLLER_IMAGE="$resolved"
       log "Manifest-resolved controller image: $CONTROLLER_IMAGE"
@@ -162,15 +246,17 @@ fi
 # the canonical compose file from the repo. Local runs (this file
 # lives next to docker-compose.yml) pick up the existing one.
 if [[ ! -f "$INSTALL_DIR/docker-compose.yml" ]]; then
-  COMPOSE_URL="${FSEVEN_COMPOSE_URL:-https://raw.githubusercontent.com/f7-platform/public-agent-binaries/main/docker-compose.yml}"
+  COMPOSE_URL_DEFAULT="https://raw.githubusercontent.com/f7-platform/public-agent-binaries/main/docker-compose.yml"
+  manifest_compose_url="$(manifest_get artifacts.docker_compose.url)"
+  manifest_compose_sha256="$(manifest_get artifacts.docker_compose.sha256)"
+  COMPOSE_URL="${FSEVEN_COMPOSE_URL:-${manifest_compose_url:-$COMPOSE_URL_DEFAULT}}"
+  COMPOSE_SHA256="${FSEVEN_COMPOSE_SHA256:-$manifest_compose_sha256}"
   log "Fetching compose file from $COMPOSE_URL"
-  if command -v curl >/dev/null 2>&1; then
-    curl -fsSL "$COMPOSE_URL" -o docker-compose.yml
-  elif command -v wget >/dev/null 2>&1; then
-    wget -q "$COMPOSE_URL" -O docker-compose.yml
-  else
-    die "Neither curl nor wget is available — cannot download compose file"
+  download_file "$COMPOSE_URL" docker-compose.yml
+  if [[ -z "$COMPOSE_SHA256" ]]; then
+    die "No SHA-256 checksum available for downloaded compose file. Use the release manifest assets.docker_compose.sha256 field or set FSEVEN_COMPOSE_SHA256."
   fi
+  verify_sha256 docker-compose.yml "$COMPOSE_SHA256" "compose file"
 fi
 
 # ── Step 3b. Stale-volume guard ──────────────────────────────────────
@@ -288,7 +374,7 @@ fi
 # silent-install mechanism. No new controller or agent code.
 OS_NAME="$(uname -s)"
 install_agent() {
-  local os arch pkg_url installer_tmp token org_id
+  local os arch pkg_url pkg_sha256 installer_tmp token org_id
   case "$OS_NAME" in
     Darwin) os=macos ;;
     *)      log "Skipping agent install (unsupported host: $OS_NAME)"; return 0 ;;
@@ -358,22 +444,32 @@ install_agent() {
   fi
 
   pkg_url="${FSEVEN_AGENT_PKG_URL:-}"
+  pkg_sha256="${FSEVEN_AGENT_PKG_SHA256:-}"
   if [[ -z "$pkg_url" && -n "$MANIFEST_JSON" ]] && command -v python3 >/dev/null 2>&1; then
     local key="macos_${arch}"
-    pkg_url="$(printf '%s' "$MANIFEST_JSON" \
-                 | python3 -c "import sys,json; print(json.load(sys.stdin)['agent']['$key'])" \
-                 2>/dev/null || true)"
+    pkg_url="$(manifest_get "agent.$key.url")"
+    if [[ -z "$pkg_url" ]]; then
+      pkg_url="$(manifest_get "agent.$key")"
+    fi
+    if [[ -z "$pkg_sha256" ]]; then
+      pkg_sha256="$(manifest_get "agent.$key.sha256")"
+    fi
   fi
   if [[ -z "$pkg_url" ]]; then
     pkg_url="https://github.com/f7-platform/public-agent-binaries/releases/latest/download/fseven-agent-${arch}-apple.pkg"
   fi
   log "Downloading agent installer: $pkg_url"
   installer_tmp="$(mktemp -d)/fseven-agent.pkg"
-  if ! curl -fsSL "$pkg_url" -o "$installer_tmp"; then
+  if ! download_file "$pkg_url" "$installer_tmp"; then
     warn "Agent installer download failed — skipping agent install.
          Grab it manually from the dashboard's Connect an Agent view."
     return 0
   fi
+  if [[ -z "$pkg_sha256" ]]; then
+    pkg_sha256="$(fetch_sidecar_sha256 "$pkg_url" "agent installer")"
+  fi
+  verify_sha256 "$installer_tmp" "$pkg_sha256" "agent installer"
+  verify_macos_pkg_signature "$installer_tmp"
 
   log "Installing agent silently (requires sudo)"
   # Write the enrollment seed file before running the installer so the
