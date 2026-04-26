@@ -6,6 +6,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 
 ## [Unreleased]
 
+### Added
+
+- `tests/bootstrap-handoff-static.sh` pins the public installer bootstrap
+  handoff contract: both install scripts read the canonical
+  `/app/model-storage/bootstrap/secrets.env` path, parse admin credentials, and
+  fall back to controller readiness on already-bootstrapped reruns.
+
 ### Planned
 
 - Windows MSI Authenticode signing once Azure Code Signing cert is provisioned
