@@ -72,7 +72,9 @@ services:
       MODEL_STORAGE_DIR: "/app/model-storage"
       RUST_LOG: "${RUST_LOG:-info,fseven_controller=info,tower_http=info}"
       ADMIN_API_KEY: "${ADMIN_API_KEY:-}"
+      CREDENTIAL_ENCRYPTION_KEY: "${CREDENTIAL_ENCRYPTION_KEY:-}"
       CONTROLLER_JWT_PRIVATE_KEY: "${CONTROLLER_JWT_PRIVATE_KEY:-}"
+      FSEVEN_LICENSE_PUB_KEY: "${FSEVEN_LICENSE_PUB_KEY:-}"
     volumes:
       - model-storage:/app/model-storage
     depends_on:

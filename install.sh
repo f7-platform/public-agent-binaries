@@ -213,6 +213,19 @@ if [[ -f "$ENV_FILE" ]]; then
   if [[ "$CONTROLLER_PORT" == "$CONTROLLER_PORT_DEFAULT" && -n "${PORT:-}" ]]; then
     CONTROLLER_PORT="$PORT"
   fi
+  # Backfill CREDENTIAL_ENCRYPTION_KEY for installs that predate the
+  # controller's encrypted-credential requirement (controller startup
+  # rejects empty key outside dev). Mirrors private installer behavior.
+  if [[ -z "${CREDENTIAL_ENCRYPTION_KEY:-}" ]]; then
+    CREDENTIAL_ENCRYPTION_KEY="$(gen_secret)"
+    cat >> "$ENV_FILE" <<ENV
+
+# Added by install.sh on $(date -u +%Y-%m-%dT%H:%M:%SZ) for encrypted telemetry HMAC keys.
+CREDENTIAL_ENCRYPTION_KEY=${CREDENTIAL_ENCRYPTION_KEY}
+ENV
+    chmod 600 "$ENV_FILE"
+    log "Added missing CREDENTIAL_ENCRYPTION_KEY to existing .env"
+  fi
   FRESH_INSTALL=no
 else
   log "Generating .env with fresh secrets"

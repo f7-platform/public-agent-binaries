@@ -131,6 +131,20 @@ $EnvFile = Join-Path $InstallDir '.env'
 $FreshInstall = $false
 if (Test-Path $EnvFile) {
     Write-Step "Existing .env found — reusing all values (no secret rotation)"
+    # Backfill CREDENTIAL_ENCRYPTION_KEY for installs that predate the
+    # controller's encrypted-credential requirement (controller startup
+    # rejects empty key outside dev). Mirrors install.sh behavior.
+    $existing = Get-Content $EnvFile -Raw
+    if ($existing -notmatch '(?m)^CREDENTIAL_ENCRYPTION_KEY=') {
+        $CredentialEncryptionKey = New-Secret
+        $timestamp = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
+        Add-Content -Path $EnvFile -Value @"
+
+# Added by install.ps1 on $timestamp for encrypted telemetry HMAC keys.
+CREDENTIAL_ENCRYPTION_KEY=$CredentialEncryptionKey
+"@
+        Write-Step "Added missing CREDENTIAL_ENCRYPTION_KEY to existing .env"
+    }
 } else {
     Write-Step "Generating .env with fresh secrets"
     $PostgresPassword        = New-Secret
