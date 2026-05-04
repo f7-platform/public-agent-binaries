@@ -9,6 +9,7 @@ See [`CLAUDE.md`](../CLAUDE.md) for the authoritative repo-level contributor gui
 3. **Directory structure:** `v{version}/{platform}/{artifact}` — e.g. `v0.1.0/macos/F7Agent-0.1.0.pkg`.
 4. **Checksums:** SHA-256 checksums are published as `SHA256SUMS` next to the binaries.
 5. **Signatures:** All binaries are Ed25519-signed by `fseven-agent` release CI. The agent verifies these at self-update time.
+6. **Static tests are allowed for installer/compose contracts only.** Run `bash tests/bootstrap-handoff-static.sh` after changing `install.sh`, `install.ps1`, or `docker-compose.yml`.
 
 ## Release Flow (not done here)
 

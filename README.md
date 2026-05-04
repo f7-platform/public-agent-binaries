@@ -47,6 +47,12 @@ irm https://raw.githubusercontent.com/f7-platform/public-agent-binaries/main/ins
 The installer brings up PostgreSQL + the controller in Docker Compose, then
 prints the one-time admin email + password. First run takes about 30 seconds.
 
+The password is also written inside the controller container at
+`/app/model-storage/bootstrap/secrets.env` for the installer handoff. The
+controller deletes that file after the first successful admin login; if nobody
+logs in, it is treated as stale and removed on a later startup after 24 hours.
+Save the printed credentials immediately and rotate the password after login.
+
 **Requirements:** Docker Desktop (macOS / Windows) or Docker Engine (Linux)
 with Compose v2; loopback port `8080` free.
 

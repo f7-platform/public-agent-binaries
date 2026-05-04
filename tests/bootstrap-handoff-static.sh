@@ -49,6 +49,14 @@ assert_contains \
   "$ROOT_DIR/install.sh" \
   'Listening (healthcheck ready)' \
   'already-bootstrapped readiness fallback'
+assert_contains \
+  "$ROOT_DIR/install.sh" \
+  'CREDENTIAL_ENCRYPTION_KEY=${CREDENTIAL_ENCRYPTION_KEY}' \
+  'fresh credential encryption key env write'
+assert_contains \
+  "$ROOT_DIR/install.sh" \
+  'Added missing CREDENTIAL_ENCRYPTION_KEY to existing .env' \
+  'existing .env credential key backfill'
 
 assert_contains \
   "$ROOT_DIR/install.ps1" \
@@ -74,5 +82,22 @@ assert_contains \
   "$ROOT_DIR/install.ps1" \
   'Listening \(healthcheck ready\)' \
   'PowerShell already-bootstrapped readiness fallback'
+assert_contains \
+  "$ROOT_DIR/install.ps1" \
+  'CREDENTIAL_ENCRYPTION_KEY=$CredentialEncryptionKey' \
+  'PowerShell fresh credential encryption key env write'
+assert_contains \
+  "$ROOT_DIR/install.ps1" \
+  'Added missing CREDENTIAL_ENCRYPTION_KEY to existing .env' \
+  'PowerShell existing .env credential key backfill'
+
+assert_contains \
+  "$ROOT_DIR/docker-compose.yml" \
+  'CREDENTIAL_ENCRYPTION_KEY: "${CREDENTIAL_ENCRYPTION_KEY:-}"' \
+  'compose credential encryption key propagation'
+assert_contains \
+  "$ROOT_DIR/docker-compose.yml" \
+  'FSEVEN_LICENSE_PUB_KEY: "${FSEVEN_LICENSE_PUB_KEY:-}"' \
+  'compose license public key propagation'
 
 printf 'bootstrap handoff static checks passed\n'
