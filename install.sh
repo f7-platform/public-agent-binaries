@@ -330,16 +330,15 @@ log "Waiting for first-run bootstrap (up to 120 s)…"
 DEADLINE=$(( $(date +%s) + 120 ))
 SECRETS_PATH="/app/model-storage/bootstrap/secrets.env"
 ADMIN_EMAIL=""
-ADMIN_PASSWORD=""
+BOOTSTRAP_READY="no"
 while [[ $(date +%s) -lt $DEADLINE ]]; do
   # Read the secrets file from inside the container. Succeeds the moment
   # bootstrap commits; exits non-zero until then.
   if creds=$(docker compose exec -T controller cat "$SECRETS_PATH" 2>/dev/null); then
     ADMIN_EMAIL=$(printf '%s\n' "$creds" \
       | grep -E '^FSEVEN_BOOTSTRAP_ADMIN_EMAIL=' | cut -d= -f2- | tr -d '\r')
-    ADMIN_PASSWORD=$(printf '%s\n' "$creds" \
-      | grep -E '^FSEVEN_BOOTSTRAP_ADMIN_PASSWORD=' | cut -d= -f2- | tr -d '\r')
-    if [[ -n "$ADMIN_EMAIL" && -n "$ADMIN_PASSWORD" ]]; then
+    if [[ -n "$ADMIN_EMAIL" ]] && printf '%s\n' "$creds" | grep -qE '^FSEVEN_BOOTSTRAP_ADMIN_PASSWORD='; then
+      BOOTSTRAP_READY="yes"
       break
     fi
   fi
@@ -356,25 +355,25 @@ done
 # ── Step 6. Print URLs + credentials ─────────────────────────────────
 DASHBOARD_URL="http://localhost:${CONTROLLER_PORT}"
 printf '\n\033[1;32m✓\033[0m fseven controller is running at %s\n\n' "$DASHBOARD_URL"
-if [[ -n "$ADMIN_EMAIL" && -n "$ADMIN_PASSWORD" ]]; then
+if [[ "$BOOTSTRAP_READY" == "yes" ]]; then
   printf '  \033[1mAdmin login\033[0m\n'
   printf '  Email:     %s\n' "$ADMIN_EMAIL"
-  printf '  Password:  %s\n' "$ADMIN_PASSWORD"
+  printf '  Password:  stored once at %s\n' "$SECRETS_PATH"
   printf '  Setup:     %s/setup\n' "$DASHBOARD_URL"
-  printf '\n  (credentials also persisted inside the controller at\n'
-  printf '   %s — in the model-storage Docker volume)\n\n' "$SECRETS_PATH"
+  printf '\n  Reveal the one-time password only when ready to log in:\n'
+  printf '    docker compose exec controller sh -lc '\''grep ^FSEVEN_BOOTSTRAP_ADMIN_PASSWORD= %s | cut -d= -f2-'\''\n\n' "$SECRETS_PATH"
   printf '  \033[1;33m→ Log in once, then rotate the password under Admin → Profile.\033[0m\n\n'
 elif [[ "$FRESH_INSTALL" == "no" ]]; then
   printf 'Dashboard:  %s\n' "$DASHBOARD_URL"
-  printf '(Admin credentials were printed on first run; retrieve them with:\n'
-  printf '   docker compose exec controller cat %s\n' "$SECRETS_PATH"
+  printf '(Bootstrap credentials are only shown on demand; retrieve the one-time password with:\n'
+  printf '   docker compose exec controller sh -lc '\''grep ^FSEVEN_BOOTSTRAP_ADMIN_PASSWORD= %s | cut -d= -f2-'\''\n' "$SECRETS_PATH"
   printf ' if you still have the model-storage volume.)\n\n'
 else
   # Fresh install but bootstrap did not complete within the deadline.
   printf '\033[1;33m⚠ Bootstrap did not complete within 120 s.\033[0m\n'
   printf 'Check logs:  docker compose logs controller\n'
   printf 'Once bootstrap finishes, get credentials with:\n'
-  printf '   docker compose exec controller cat %s\n\n' "$SECRETS_PATH"
+  printf '   docker compose exec controller sh -lc '\''grep ^FSEVEN_BOOTSTRAP_ADMIN_PASSWORD= %s | cut -d= -f2-'\''\n\n' "$SECRETS_PATH"
 fi
 
 # ── Step 7. Self-observer chaining (PR-19) ───────────────────────────

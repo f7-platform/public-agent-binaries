@@ -14,6 +14,17 @@ assert_contains() {
   fi
 }
 
+assert_not_contains() {
+  local file="$1"
+  local needle="$2"
+  local description="$3"
+
+  if grep -Fq -- "$needle" "$file"; then
+    printf 'unexpected %s in %s\n' "$description" "$file" >&2
+    exit 1
+  fi
+}
+
 assert_contains \
   "$ROOT_DIR/install.sh" \
   'SECRETS_PATH="/app/model-storage/bootstrap/secrets.env"' \
@@ -29,7 +40,11 @@ assert_contains \
 assert_contains \
   "$ROOT_DIR/install.sh" \
   '^FSEVEN_BOOTSTRAP_ADMIN_PASSWORD=' \
-  'admin password parser'
+  'admin password readiness check'
+assert_not_contains \
+  "$ROOT_DIR/install.sh" \
+  'ADMIN_PASSWORD="' \
+  'shell password variable'
 assert_contains \
   "$ROOT_DIR/install.sh" \
   'Listening (healthcheck ready)' \
@@ -50,7 +65,11 @@ assert_contains \
 assert_contains \
   "$ROOT_DIR/install.ps1" \
   '^FSEVEN_BOOTSTRAP_ADMIN_PASSWORD=' \
-  'PowerShell admin password parser'
+  'PowerShell admin password readiness check'
+assert_not_contains \
+  "$ROOT_DIR/install.ps1" \
+  '$AdminPassword' \
+  'PowerShell password variable'
 assert_contains \
   "$ROOT_DIR/install.ps1" \
   'Listening \(healthcheck ready\)' \

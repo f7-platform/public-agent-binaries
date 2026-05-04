@@ -233,15 +233,16 @@ Write-Step "Waiting for first-run bootstrap (up to 120 s)…"
 $deadline = (Get-Date).AddSeconds(120)
 $SecretsPath = "/app/model-storage/bootstrap/secrets.env"
 $AdminEmail = $null
-$AdminPassword = $null
+$BootstrapReady = $false
 while ((Get-Date) -lt $deadline) {
     $creds = docker compose exec -T controller cat $SecretsPath 2>$null
     if ($LASTEXITCODE -eq 0 -and $creds) {
         $AdminEmail = ($creds -split "`n" | Where-Object { $_ -match '^FSEVEN_BOOTSTRAP_ADMIN_EMAIL=' } |
             ForEach-Object { ($_ -split '=', 2)[1].Trim() } | Select-Object -First 1)
-        $AdminPassword = ($creds -split "`n" | Where-Object { $_ -match '^FSEVEN_BOOTSTRAP_ADMIN_PASSWORD=' } |
-            ForEach-Object { ($_ -split '=', 2)[1].Trim() } | Select-Object -First 1)
-        if ($AdminEmail -and $AdminPassword) { break }
+        if ($AdminEmail -and (($creds -split "`n") -match '^FSEVEN_BOOTSTRAP_ADMIN_PASSWORD=')) {
+            $BootstrapReady = $true
+            break
+        }
     }
     if (-not $FreshInstall) {
         $logs = docker compose logs --no-color controller 2>$null
@@ -255,27 +256,27 @@ $DashboardUrl = "http://localhost:$Port"
 Write-Host ""
 Write-Host "✓ fseven controller is running at $DashboardUrl" -ForegroundColor Green
 Write-Host ""
-if ($AdminEmail -and $AdminPassword) {
+if ($BootstrapReady) {
     Write-Host "  Admin login" -ForegroundColor White
     Write-Host "  Email:     $AdminEmail"
-    Write-Host "  Password:  $AdminPassword"
+    Write-Host "  Password:  stored once at $SecretsPath"
     Write-Host "  Setup:     $DashboardUrl/setup"
     Write-Host ""
-    Write-Host "  (credentials also persisted inside the controller at"
-    Write-Host "   $SecretsPath — in the model-storage Docker volume)"
+    Write-Host "  Reveal the one-time password only when ready to log in:"
+    Write-Host "    docker compose exec controller sh -lc 'grep ^FSEVEN_BOOTSTRAP_ADMIN_PASSWORD= $SecretsPath | cut -d= -f2-'"
     Write-Host ""
     Write-Host "  -> Log in once, then rotate the password under Admin -> Profile." -ForegroundColor Yellow
     Write-Host ""
 } elseif (-not $FreshInstall) {
     Write-Host "Dashboard:  $DashboardUrl"
-    Write-Host "(Admin credentials were printed on first run; retrieve them with:"
-    Write-Host "   docker compose exec controller cat $SecretsPath"
+    Write-Host "(Bootstrap credentials are only shown on demand; retrieve the one-time password with:"
+    Write-Host "   docker compose exec controller sh -lc 'grep ^FSEVEN_BOOTSTRAP_ADMIN_PASSWORD= $SecretsPath | cut -d= -f2-'"
     Write-Host " if you still have the model-storage volume.)"
 } else {
     Write-Host "WARNING: Bootstrap did not complete within 120 s." -ForegroundColor Yellow
     Write-Host "Check logs:  docker compose logs controller"
     Write-Host "Once bootstrap finishes, get credentials with:"
-    Write-Host "   docker compose exec controller cat $SecretsPath"
+    Write-Host "   docker compose exec controller sh -lc 'grep ^FSEVEN_BOOTSTRAP_ADMIN_PASSWORD= $SecretsPath | cut -d= -f2-'"
 }
 
 # ── Step 7. Self-observer chaining (PR-19) ───────────────────────────
