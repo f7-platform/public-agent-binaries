@@ -88,10 +88,10 @@ The device appears in the dashboard under **Devices** within a few seconds.
 Repeat Step 3 for every endpoint you want to enroll. The pairing code keeps
 rotating in the background; any valid, unexpired code works.
 
-> **Note (v0.2.0):** macOS PKGs and the Windows MSI ship unsigned
-> (no Apple Developer ID / Authenticode cert provisioned), so Gatekeeper /
-> SmartScreen will prompt on manual download. Click through — the agent
-> binaries are built from source in a tagged release workflow.
+> **Release trust:** macOS PKGs are built through the agent release workflow
+> with Apple signing/notarization verification, and Windows MSI artifacts are
+> verified with Authenticode when release signing secrets are configured.
+> Published assets also include checksums from the tagged release workflow.
 
 ---
 
