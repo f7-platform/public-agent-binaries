@@ -100,4 +100,31 @@ assert_contains \
   'FSEVEN_LICENSE_PUB_KEY: "${FSEVEN_LICENSE_PUB_KEY:-}"' \
   'compose license public key propagation'
 
+if command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; then
+  rendered_compose="$(mktemp)"
+  trap 'rm -f "$rendered_compose"' EXIT
+  (
+    cd "$ROOT_DIR"
+    POSTGRES_PASSWORD='test-postgres-password' \
+      ADMIN_API_KEY='test-admin-key' \
+      CREDENTIAL_ENCRYPTION_KEY='0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef' \
+      FSEVEN_LICENSE_PUB_KEY='test-license-public-key' \
+      docker compose --profile community config > "$rendered_compose"
+  )
+  assert_contains \
+    "$rendered_compose" \
+    'CREDENTIAL_ENCRYPTION_KEY: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef' \
+    'rendered compose credential encryption key'
+  assert_contains \
+    "$rendered_compose" \
+    'FSEVEN_LICENSE_PUB_KEY: test-license-public-key' \
+    'rendered compose license public key'
+  assert_contains \
+    "$rendered_compose" \
+    'DATABASE_URL: postgres://seven:test-postgres-password@postgres:5432/seven_controller' \
+    'rendered compose database password propagation'
+else
+  printf 'docker compose not available; skipped rendered compose contract\n'
+fi
+
 printf 'bootstrap handoff static checks passed\n'
