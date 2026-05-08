@@ -52,10 +52,11 @@ services:
   # Intentionally NOT in `dev`: dev developers run `cargo run` on the host
   # to get hot-reload + native debugger.
   controller:
+    # NOTE: This repo is a distribution/installer repo — it does not contain a
+    # Dockerfile. The controller image is published from the private
+    # fseven-controller repo. Set CONTROLLER_IMAGE to pin a specific tag;
+    # the default pulls the latest stable release from GHCR.
     image: ${CONTROLLER_IMAGE:-ghcr.io/f7-platform/public-agent-binaries/controller:latest}
-    build:
-      context: .
-      dockerfile: Dockerfile
     container_name: fseven-controller
     restart: unless-stopped
     profiles: [community, prod]

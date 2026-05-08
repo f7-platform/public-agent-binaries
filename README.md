@@ -76,6 +76,10 @@ Download the right file from the
 | Windows x86_64      | `fseven-agent-x86_64-windows.msi` |
 | Linux x86_64        | `fseven-agent-x86_64-linux.tar.gz` |
 
+> **Windows ARM64:** A native ARM64 build for Windows on Arm is not yet
+> available. The x86_64 MSI runs under x86_64 emulation on Windows 11 ARM64
+> machines; native performance and full compatibility are not guaranteed.
+
 Install it normally — double-click the PKG/MSI, or `tar xzf` + run the
 included script on Linux. On first launch the agent opens a local browser tab
 where you paste:
@@ -94,10 +98,14 @@ The device appears in the dashboard under **Devices** within a few seconds.
 Repeat Step 3 for every endpoint you want to enroll. The pairing code keeps
 rotating in the background; any valid, unexpired code works.
 
-> **Release trust:** macOS PKGs are built through the agent release workflow
-> with Apple signing/notarization verification, and Windows MSI artifacts are
-> verified with Authenticode when release signing secrets are configured.
-> Published assets also include checksums from the tagged release workflow.
+> **Release trust:** macOS PKGs are submitted to Apple's notarization service
+> when the release pipeline has signing credentials configured (see the
+> `fseven-agent` release workflow for current status). Windows MSI artifacts
+> include Authenticode signatures when release signing credentials are active.
+> Published release assets include SHA-256 checksums in `.sha256` sidecar
+> files and are verified by the install scripts before use. Check the release
+> notes for the specific tag you are installing to confirm which signing and
+> notarization steps ran for that release.
 
 ---
 
@@ -210,9 +218,26 @@ This keeps MDM packages and documentation evergreen.
 | Windows x86_64      | `fseven-agent-x86_64-windows.msi` |
 | Linux x86_64        | `fseven-agent-x86_64-linux.tar.gz` |
 
+> **Windows ARM64:** Not natively supported. The x86_64 MSI runs under
+> emulation on Windows 11 ARM64; native support is planned but not yet
+> available.
+
 ---
 
-## Release artifacts
+## Platform support boundaries
+
+| Platform | Status | Notes |
+|---|---|---|
+| macOS Apple Silicon (aarch64) | ✅ Supported | Native |
+| macOS Intel (x86_64) | ✅ Supported | Native |
+| Windows x86_64 | ✅ Supported | Native |
+| Windows ARM64 | ⚠️ Emulation only | x86_64 MSI runs via WOW64 emulation; native build planned |
+| Linux x86_64 | ✅ Supported | tar.gz + systemd |
+| Linux ARM64 | ❌ Not yet available | Planned |
+| Linux GPU / CUDA / ONNX | ❌ Not applicable | The agent does not currently use GPU acceleration |
+| Cloud-managed / SaaS controller | ❌ Not yet available | Self-hosted only at this time |
+
+---
 
 Each release tag (`vX.Y.Z`) produces:
 
@@ -307,3 +332,6 @@ not matter.
 
 Report issues at <https://github.com/f7-platform/public-agent-binaries/issues>
 (this repo). Source-level issues are triaged internally.
+
+To report a security vulnerability, see [SECURITY.md](SECURITY.md) — do not
+open a public issue for security reports.
