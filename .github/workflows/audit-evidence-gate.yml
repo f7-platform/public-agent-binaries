@@ -1,0 +1,174 @@
+name: Audit Evidence Gate
+
+# Canonical source: fseven-platform meta repo.
+# Deploy a copy of this file to each child repo at .github/workflows/audit-evidence-gate.yml.
+#
+# Two responsibilities:
+# 1. issues.closed   — auto-reopen any audit:run-N issue closed without a Mode B
+#                       evidence-table comment or an APPROVED verifier comment.
+# 2. issue_comment   — when the audit-verifier agent posts a verdict=APPROVED
+#                       comment, remove status:needs-reaudit and close the issue.
+#                       verdict=REJECTED takes no automated action.
+#
+# Implements the Mode B evidence rule from
+# .github/agents/audit-sprint-action.agent.md and the verifier handoff defined
+# in .github/agents/audit-verifier.agent.md.
+
+on:
+  issues:
+    types: [closed]
+  issue_comment:
+    types: [created]
+
+permissions:
+  issues: write
+
+jobs:
+  enforce-close:
+    if: github.event_name == 'issues' && contains(join(github.event.issue.labels.*.name, ','), 'audit:run-')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Reopen if closed without evidence
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const issue = context.payload.issue;
+            const labels = issue.labels.map(l => l.name);
+            const auditLabel = labels.find(n => /^audit:run-\d+$/.test(n));
+            if (!auditLabel) return;
+
+            if (issue.state_reason === 'not_planned') {
+              core.info(`Issue #${issue.number} closed as not_planned — skipping gate.`);
+              return;
+            }
+
+            const comments = await github.paginate(github.rest.issues.listComments, {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: issue.number,
+              per_page: 100,
+            });
+
+            const verifierApproved = comments.some(c =>
+              /<!-- audit-verifier:verdict=APPROVED -->/.test(c.body || '')
+            );
+            if (verifierApproved) {
+              core.info(`Issue #${issue.number} has verifier APPROVED — gate passes.`);
+              return;
+            }
+
+            const STATUS_RE = /\b(VERIFIED|PARTIAL|ALREADY-PRESENT|BLOCKED)\b/;
+            const SHA_RE = /\b[0-9a-f]{7,40}\b/i;
+            const TEST_RE = /cargo (test|build)|pnpm.*test|pytest|vitest|playwright|npm test/i;
+
+            const hasEvidence = comments.some(c => {
+              const body = c.body || '';
+              if (!STATUS_RE.test(body)) return false;
+              if (/\b(VERIFIED|PARTIAL)\b/.test(body)) {
+                return SHA_RE.test(body) || TEST_RE.test(body);
+              }
+              return body.replace(/\s+/g, ' ').length > 120;
+            });
+
+            if (hasEvidence) {
+              core.info(`Issue #${issue.number} closed with Mode B evidence — gate passes.`);
+              return;
+            }
+
+            const closer = context.payload.sender?.login || 'unknown';
+            core.warning(`Issue #${issue.number} closed by @${closer} without evidence — reopening.`);
+
+            await github.rest.issues.update({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: issue.number,
+              state: 'open',
+            });
+
+            if (!labels.includes('status:needs-reaudit')) {
+              try {
+                await github.rest.issues.addLabels({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: issue.number,
+                  labels: ['status:needs-reaudit'],
+                });
+              } catch (e) {
+                core.warning(`Could not add status:needs-reaudit label: ${e.message}`);
+              }
+            }
+
+            const body = [
+              '## ⚠️ Audit Evidence Gate — auto-reopened',
+              '',
+              `This issue is labeled \`${auditLabel}\` but was closed without a completion comment containing the Mode B evidence table or an APPROVED audit-verifier comment.`,
+              '',
+              'To close this issue, do one of:',
+              '',
+              '- Post a Mode B completion comment with status tokens (`VERIFIED` / `PARTIAL` / `ALREADY-PRESENT` / `BLOCKED`), a commit SHA, and test/CI evidence; then close.',
+              '- Invoke the `audit-verifier` agent. When it posts `verdict=APPROVED` this workflow will close the issue automatically.',
+              '- If you intentionally want to abandon this work, close as `not planned` — that path is not gated.',
+            ].join('\n');
+
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: issue.number,
+              body,
+            });
+
+  verifier-autoclose:
+    if: github.event_name == 'issue_comment' && !github.event.issue.pull_request && contains(github.event.comment.body, '<!-- audit-verifier:verdict=APPROVED -->')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Close on verifier approval
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const issue = context.payload.issue;
+            const labels = issue.labels.map(l => l.name);
+            const auditLabel = labels.find(n => /^audit:run-\d+$/.test(n));
+            if (!auditLabel) {
+              core.info('No audit:run-N label; ignoring verifier comment.');
+              return;
+            }
+            if (issue.state === 'closed') {
+              core.info(`Issue #${issue.number} already closed.`);
+              return;
+            }
+
+            const body = context.payload.comment.body || '';
+            if (!/<!-- audit-verifier:start -->/.test(body) ||
+                !/<!-- audit-verifier:end -->/.test(body)) {
+              core.warning(`Approval marker without surrounding start/end markers on issue #${issue.number}; ignoring.`);
+              return;
+            }
+
+            if (labels.includes('status:needs-reaudit')) {
+              try {
+                await github.rest.issues.removeLabel({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: issue.number,
+                  name: 'status:needs-reaudit',
+                });
+              } catch (e) {
+                core.warning(`Could not remove status:needs-reaudit: ${e.message}`);
+              }
+            }
+
+            await github.rest.issues.update({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: issue.number,
+              state: 'closed',
+              state_reason: 'completed',
+            });
+
+            const verifier = context.payload.sender?.login || 'audit-verifier';
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: issue.number,
+              body: `## ✅ Audit Evidence Gate — auto-closed\n\nClosed automatically based on \`audit-verifier\` APPROVED verdict from @${verifier}. See the verifier report comment above for per-criterion evidence.`,
+            });
