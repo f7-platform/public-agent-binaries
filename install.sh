@@ -308,10 +308,23 @@ fi
 # ── Step 4. Pull + up ────────────────────────────────────────────────
 log "Pulling latest controller image"
 if ! docker compose --profile community pull 2>&1 | tee /tmp/fseven-pull.log; then
-  if grep -qiE 'manifest unknown|not found|denied' /tmp/fseven-pull.log; then
-    warn "Image pull failed (image may not yet be published for this tag).
-         Falling back to a local build from the working tree."
-    docker compose --profile community build
+  if grep -qiE 'manifest unknown|not found|denied|unauthorized' /tmp/fseven-pull.log; then
+    rm -f /tmp/fseven-pull.log
+    die "Image pull failed: the controller image could not be fetched from the registry.
+
+This installer is published from the public-agent-binaries repo, which
+intentionally does NOT contain a Dockerfile or controller source — it is
+a distribution shell only. There is no local-build fallback (PD2).
+
+To recover:
+  1. Confirm CONTROLLER_IMAGE points at a published tag, e.g.
+       export CONTROLLER_IMAGE=ghcr.io/f7-platform/public-agent-binaries/controller:<tag>
+     and re-run install.sh. The default 'latest' is sometimes unavailable
+     between releases; pin a specific version from the public release notes.
+  2. If you are behind a registry mirror or air-gapped, follow the
+     air-gapped install steps in the public docs (search 'air-gapped').
+  3. If you are entitled to the source build, use the private
+     fseven-controller repo and its 'docker build' instructions there."
   else
     die "Image pull failed for an unrecognised reason; see /tmp/fseven-pull.log"
   fi
