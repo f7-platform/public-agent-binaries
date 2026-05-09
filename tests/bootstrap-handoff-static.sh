@@ -58,6 +58,20 @@ assert_contains \
   'Added missing CREDENTIAL_ENCRYPTION_KEY to existing .env' \
   'existing .env credential key backfill'
 
+# PD2 (Run 28 / Run 29): public-agent-binaries does not ship a Dockerfile or
+# controller source. install.sh must NOT attempt a local docker-compose build
+# fallback when image pull fails — that path always fails and misleads
+# operators. It must also document the lack of a fallback in the failure
+# message so operators don't go hunting for a build context.
+assert_not_contains \
+  "$ROOT_DIR/install.sh" \
+  'docker compose --profile community build' \
+  'PD2: removed broken local-build fallback'
+assert_contains \
+  "$ROOT_DIR/install.sh" \
+  'There is no local-build fallback (PD2)' \
+  'PD2: explicit no-fallback message in pull-failure die'
+
 assert_contains \
   "$ROOT_DIR/install.ps1" \
   '$SecretsPath = "/app/model-storage/bootstrap/secrets.env"' \
