@@ -132,10 +132,6 @@ jobs:
               core.info('No audit:run-N label; ignoring verifier comment.');
               return;
             }
-            if (issue.state === 'closed') {
-              core.info(`Issue #${issue.number} already closed.`);
-              return;
-            }
 
             const body = context.payload.comment.body || '';
             if (!/<!-- audit-verifier:start -->/.test(body) ||
@@ -157,18 +153,22 @@ jobs:
               }
             }
 
-            await github.rest.issues.update({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              issue_number: issue.number,
-              state: 'closed',
-              state_reason: 'completed',
-            });
-
-            const verifier = context.payload.sender?.login || 'audit-verifier';
-            await github.rest.issues.createComment({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              issue_number: issue.number,
-              body: `## ✅ Audit Evidence Gate — auto-closed\n\nClosed automatically based on \`audit-verifier\` APPROVED verdict from @${verifier}. See the verifier report comment above for per-criterion evidence.`,
-            });
+            const wasOpen = issue.state !== 'closed';
+            if (wasOpen) {
+              await github.rest.issues.update({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issue.number,
+                state: 'closed',
+                state_reason: 'completed',
+              });
+              const verifier = context.payload.sender?.login || 'audit-verifier';
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issue.number,
+                body: `## ✅ Audit Evidence Gate — auto-closed\n\nClosed automatically based on \`audit-verifier\` APPROVED verdict from @${verifier}. See the verifier report comment above for per-criterion evidence.`,
+              });
+            } else {
+              core.info(`Issue #${issue.number} already closed; verifier APPROVED — stripped status:needs-reaudit if present, no state change.`);
+            }
