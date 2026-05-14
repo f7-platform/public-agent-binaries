@@ -114,6 +114,31 @@ assert_contains \
   'FSEVEN_LICENSE_PUB_KEY: "${FSEVEN_LICENSE_PUB_KEY:-}"' \
   'compose license public key propagation'
 
+assert_contains \
+  "$ROOT_DIR/README.md" \
+  'curl -fsSLO "$release_base/$asset.sha256"' \
+  'manual macOS/Linux checksum sidecar download'
+assert_contains \
+  "$ROOT_DIR/README.md" \
+  'pkgutil --check-signature "$asset"' \
+  'manual macOS package signature verification'
+assert_contains \
+  "$ROOT_DIR/README.md" \
+  'Get-FileHash $msi -Algorithm SHA256' \
+  'manual Windows checksum verification'
+assert_contains \
+  "$ROOT_DIR/README.md" \
+  'Get-AuthenticodeSignature $msi' \
+  'manual Windows Authenticode verification'
+assert_contains \
+  "$ROOT_DIR/README.md" \
+  'if ($signature.Status -ne '\''Valid'\'') { throw "No valid Authenticode signature for $msi" }' \
+  'manual Windows Authenticode fail-closed check'
+assert_contains \
+  "$ROOT_DIR/README.md" \
+  'sha256sum "$asset"' \
+  'manual Linux checksum verification'
+
 if command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; then
   rendered_compose="$(mktemp)"
   trap 'rm -f "$rendered_compose"' EXIT

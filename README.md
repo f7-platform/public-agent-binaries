@@ -154,8 +154,15 @@ Replace `YOUR_TOKEN_HERE` with the token you minted and
 #### macOS
 
 ```bash
-curl -fsSLo fseven-agent.pkg \
-  https://github.com/f7-platform/public-agent-binaries/releases/latest/download/fseven-agent-aarch64-apple.pkg
+release_base="https://github.com/f7-platform/public-agent-binaries/releases/latest/download"
+asset="fseven-agent-aarch64-apple.pkg"
+
+curl -fsSLO "$release_base/$asset"
+curl -fsSLO "$release_base/$asset.sha256"
+expected="$(awk '{print $1}' "$asset.sha256")"
+actual="$(shasum -a 256 "$asset" | awk '{print $1}')"
+test "$expected" = "$actual"
+pkgutil --check-signature "$asset"
 
 sudo mkdir -p /etc/fseven
 sudo tee /etc/fseven/enrollment-seed.toml >/dev/null <<EOF
@@ -164,16 +171,29 @@ controller_url   = "https://your-controller.example.com"
 EOF
 sudo chmod 0600 /etc/fseven/enrollment-seed.toml
 
-sudo installer -pkg fseven-agent.pkg -target /
+sudo installer -pkg "$asset" -target /
 ```
 
 #### Windows (MSI transform / Intune / SCCM)
 
 ```powershell
+$base = 'https://github.com/f7-platform/public-agent-binaries/releases/latest/download'
 $msi = "$env:TEMP\fseven-agent.msi"
+$sha = "$msi.sha256"
 Invoke-WebRequest -UseBasicParsing `
-  -Uri  https://github.com/f7-platform/public-agent-binaries/releases/latest/download/fseven-agent-x86_64-windows.msi `
+  -Uri  "$base/fseven-agent-x86_64-windows.msi" `
   -OutFile $msi
+Invoke-WebRequest -UseBasicParsing `
+  -Uri  "$base/fseven-agent-x86_64-windows.msi.sha256" `
+  -OutFile $sha
+
+$expected = ((Get-Content $sha -Raw).Trim() -split '\s+')[0].ToLowerInvariant()
+$actual = (Get-FileHash $msi -Algorithm SHA256).Hash.ToLowerInvariant()
+if ($actual -ne $expected) { throw "SHA-256 mismatch for $msi" }
+
+$signature = Get-AuthenticodeSignature $msi
+if ($signature.Status -ne 'Valid') { throw "No valid Authenticode signature for $msi" }
+Write-Host "Authenticode signature valid: $($signature.SignerCertificate.Subject)"
 
 Start-Process msiexec.exe -Wait -ArgumentList @(
   '/i', $msi, '/quiet', '/norestart',
@@ -185,9 +205,15 @@ Start-Process msiexec.exe -Wait -ArgumentList @(
 #### Linux
 
 ```bash
-curl -fsSL \
-  https://github.com/f7-platform/public-agent-binaries/releases/latest/download/fseven-agent-x86_64-linux.tar.gz \
-  | tar -xz
+release_base="https://github.com/f7-platform/public-agent-binaries/releases/latest/download"
+asset="fseven-agent-x86_64-linux.tar.gz"
+
+curl -fsSLO "$release_base/$asset"
+curl -fsSLO "$release_base/$asset.sha256"
+expected="$(awk '{print $1}' "$asset.sha256")"
+actual="$(sha256sum "$asset" | awk '{print $1}')"
+test "$expected" = "$actual"
+tar -xzf "$asset"
 cd fseven-agent-v*
 
 sudo mkdir -p /etc/fseven

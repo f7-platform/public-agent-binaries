@@ -12,6 +12,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
   handoff contract: both install scripts read the canonical
   `/app/model-storage/bootstrap/secrets.env` path, parse admin credentials, and
   fall back to controller readiness on already-bootstrapped reruns.
+- Manual Enterprise/MDM install snippets now verify downloaded agent assets with
+  SHA-256 sidecars before installation; macOS snippets also run
+  `pkgutil --check-signature`, and Windows snippets require valid Authenticode
+  status.
+- Static README checks now pin manual checksum/signature verification commands.
 
 ### Planned
 
