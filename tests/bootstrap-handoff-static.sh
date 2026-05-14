@@ -104,6 +104,18 @@ assert_contains \
   "$ROOT_DIR/install.ps1" \
   'Added missing CREDENTIAL_ENCRYPTION_KEY to existing .env' \
   'PowerShell existing .env credential key backfill'
+assert_contains \
+  "$ROOT_DIR/install.ps1" \
+  'Existing .env PORT detected; using port $Port' \
+  'PowerShell existing .env port reuse'
+assert_contains \
+  "$ROOT_DIR/install.ps1" \
+  'Windows ARM64 detected — using x86_64 MSI under emulation' \
+  'PowerShell Windows ARM64 emulation warning'
+assert_not_contains \
+  "$ROOT_DIR/install.ps1" \
+  "'ARM64' { 'aarch64' }" \
+  'PowerShell Windows ARM64 native asset fallback'
 
 assert_contains \
   "$ROOT_DIR/docker-compose.yml" \

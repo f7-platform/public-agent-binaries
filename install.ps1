@@ -135,6 +135,10 @@ if (Test-Path $EnvFile) {
     # controller's encrypted-credential requirement (controller startup
     # rejects empty key outside dev). Mirrors install.sh behavior.
     $existing = Get-Content $EnvFile -Raw
+    if ($existing -match '(?m)^PORT=(\d+)$') {
+        $Port = [int]$Matches[1]
+        Write-Step "Existing .env PORT detected; using port $Port"
+    }
     if ($existing -notmatch '(?m)^CREDENTIAL_ENCRYPTION_KEY=') {
         $CredentialEncryptionKey = New-Secret
         $timestamp = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
@@ -288,7 +292,10 @@ function Install-FsevenAgent {
 
     $arch = switch ($env:PROCESSOR_ARCHITECTURE) {
         'AMD64' { 'x86_64' }
-        'ARM64' { 'aarch64' }
+        'ARM64' {
+            Write-Warn2 "Windows ARM64 detected — using x86_64 MSI under emulation"
+            'x86_64'
+        }
         default { Write-Warn2 "Unsupported arch $($env:PROCESSOR_ARCHITECTURE) — skipping"; return }
     }
 
