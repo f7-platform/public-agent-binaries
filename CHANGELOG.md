@@ -21,10 +21,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
   status.
 - Static README checks now pin manual checksum/signature verification commands.
 
+### Release Trust
+
+- Release trust is per tag: published assets include SHA-256 `.sha256` sidecars
+  and manifest checksum metadata, while macOS notarization and Windows
+  Authenticode signatures are present only when release signing credentials are
+  active for that tag. Release notes should say which signing and notarization
+  steps ran for each release.
+
 ### Planned
 
-- Windows MSI Authenticode signing once Azure Code Signing cert is provisioned
-- macOS PKG Developer ID + notarization (Apple Developer ID cert pending)
+- Make Windows Authenticode signing and macOS notarization mandatory in release
+  CI once the required certificates are provisioned.
 
 ## [0.2.0] — 2026-04-24
 

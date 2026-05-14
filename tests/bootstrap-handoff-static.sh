@@ -150,6 +150,34 @@ assert_contains \
   "$ROOT_DIR/README.md" \
   'sha256sum "$asset"' \
   'manual Linux checksum verification'
+assert_contains \
+  "$ROOT_DIR/CHANGELOG.md" \
+  'Release trust is per tag' \
+  'changelog release trust posture'
+assert_contains \
+  "$ROOT_DIR/CHANGELOG.md" \
+  'Release notes should say which signing and notarization' \
+  'per-release signing/notarization status'
+assert_contains \
+  "$ROOT_DIR/.github/copilot-instructions.md" \
+  'release-manifest.json' \
+  'copilot instructions current manifest release flow'
+assert_contains \
+  "$ROOT_DIR/.github/copilot-instructions.md" \
+  '.sha256' \
+  'copilot instructions current checksum flow'
+assert_contains \
+  "$ROOT_DIR/.github/copilot-instructions.md" \
+  'Windows ARM64 uses the Windows' \
+  'copilot instructions Windows ARM64 emulation posture'
+assert_not_contains \
+  "$ROOT_DIR/.github/copilot-instructions.md" \
+  'v{version}/{platform}/{artifact}' \
+  'stale copilot instructions versioned directory flow'
+assert_not_contains \
+  "$ROOT_DIR/.github/copilot-instructions.md" \
+  'SHA256SUMS' \
+  'stale copilot instructions SHA256SUMS flow'
 
 if command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; then
   rendered_compose="$(mktemp)"

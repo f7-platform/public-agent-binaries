@@ -4,20 +4,38 @@ See [`CLAUDE.md`](../CLAUDE.md) for the authoritative repo-level contributor gui
 
 ## Quick Rules
 
-1. **Binary distribution only.** This repo has NO build system and NO source code.
+1. **Public distribution only.** This repo has installer scripts, release docs,
+	static contract tests, and published assets; it has NO controller or agent
+	source build system.
 2. **Never commit secrets.** No credentials, no pre-release builds, no internal docs.
-3. **Directory structure:** `v{version}/{platform}/{artifact}` — e.g. `v0.1.0/macos/F7Agent-0.1.0.pkg`.
-4. **Checksums:** SHA-256 checksums are published as `SHA256SUMS` next to the binaries.
-5. **Signatures:** All binaries are Ed25519-signed by `fseven-agent` release CI. The agent verifies these at self-update time.
-6. **Static tests are allowed for installer/compose contracts only.** Run `bash tests/bootstrap-handoff-static.sh` after changing `install.sh`, `install.ps1`, or `docker-compose.yml`; it renders the community Compose profile when Docker Compose is available.
+3. **Release shape:** current releases use GitHub Release assets with canonical
+   filenames plus `release-manifest.json`; do not describe or recreate the old
+   versioned directory layout.
+4. **Checksums:** SHA-256 checksums are published as `.sha256` sidecars and/or
+   release-manifest checksum metadata. Do not edit checksum assets manually.
+5. **Signatures:** macOS notarization and Windows Authenticode signing are
+   per-release trust signals that depend on configured release credentials;
+   check the release notes before claiming they ran for a specific tag.
+6. **Platform support:** supported agent assets are macOS Intel, macOS Apple
+   Silicon, Windows x86_64, and Linux x86_64. Windows ARM64 uses the Windows
+   x86_64 MSI under emulation until a native asset exists.
+7. **Static tests are allowed for installer/compose/doc contracts only.** Run
+   `bash tests/bootstrap-handoff-static.sh` after changing `install.sh`,
+   `install.ps1`, `docker-compose.yml`, `README.md`, `CHANGELOG.md`, or this
+   instruction file; it renders the community Compose profile when Docker
+   Compose is available.
 
 ## Release Flow (not done here)
 
-Binaries are built and signed in `fseven-agent`'s GitHub Actions release workflow. They land in this repo via the `publish-to-public-binaries` job. Humans should never `git add` a binary directly.
+Controller images and agent installers are produced by private `fseven-controller`
+and `fseven-agent` release workflows. They land here as GitHub Release assets and
+sync `install.sh`, `install.ps1`, `docker-compose.yml`, and `release-manifest.json`
+metadata. Humans should never `git add` a binary directly.
 
 ## What Copilot Should NOT Do
 
 - Generate, modify, or rebuild binaries.
 - Suggest adding a CI or build script.
-- Edit `SHA256SUMS` manually.
-- Reference non-existent platforms (e.g., arm32, FreeBSD) — supported set is macOS (Intel + Apple Silicon), Windows x64, Linux x64.
+- Edit checksum assets manually.
+- Reference non-existent platforms (e.g., arm32, FreeBSD, native Windows ARM64)
+	as supported.
