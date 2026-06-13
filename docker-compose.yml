@@ -12,9 +12,10 @@
 #                                                  `cargo run` on the host.
 #
 # Environment (typically written to `.env` by install.sh / install.ps1):
-#   POSTGRES_PASSWORD           — required for prod/community; dev default
-#                                 is "devpassword". install.sh generates
-#                                 a strong password on first run.
+#   POSTGRES_PASSWORD           — REQUIRED for every profile; no default.
+#                                 Compose fails closed if unset (PB7). install.sh
+#                                 generates a strong password; for local dev copy
+#                                 .env.example to .env.
 #   ADMIN_API_KEY               — required when the controller service runs
 #   CONTROLLER_JWT_PRIVATE_KEY  — optional (controller generates on boot
 #                                 if unset)
@@ -33,7 +34,7 @@ services:
     restart: unless-stopped
     environment:
       POSTGRES_USER: seven
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-devpassword}
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required and has no default; set a strong secret in .env (install.sh generates one) or copy .env.example for local dev.}"
       POSTGRES_DB: seven_controller
     ports:
       # Bind to loopback by default — community deployments don't need
@@ -94,7 +95,7 @@ services:
     profiles: [prod, dev]
     environment:
       OPENFGA_DATASTORE_ENGINE: postgres
-      OPENFGA_DATASTORE_URI: "postgres://seven:${POSTGRES_PASSWORD:-devpassword}@postgres:5432/seven_controller"
+      OPENFGA_DATASTORE_URI: "postgres://seven:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required and has no default}@postgres:5432/seven_controller"
       OPENFGA_LOG_LEVEL: "info"
       OPENFGA_PLAYGROUND_ENABLED: "true"
     ports:
