@@ -6,6 +6,27 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 
 ## [Unreleased]
 
+### Changed
+
+- `docker-compose.yml` env-doc header and Postgres host-port mapping brought
+  back into parity with the `fseven-controller` source-of-truth compose
+  (Audit Run 34/35, INF9): documents `CREDENTIAL_ENCRYPTION_KEY`,
+  `FSEVEN_LICENSE_PUB_KEY`, `POSTGRES_PORT`, and `POSTGRES_BIND`; adds the
+  `POSTGRES_PORT` host-port override (`${POSTGRES_BIND:-127.0.0.1}:${POSTGRES_PORT:-5432}:5432`)
+  so hosts where 5432 is taken can remap without editing the file; and declares
+  the file a synced mirror of its source of truth. No service topology change.
+
+### Security
+
+- `tests/bootstrap-handoff-static.sh` now asserts the compose `POSTGRES_PASSWORD`
+  fail-closed invariant — both statically (the `${POSTGRES_PASSWORD:?…}` form is
+  present and the `:-devpassword` weak default is absent) and, when Docker is
+  available, at render time (`docker compose config` errors out when the password
+  is unset). This is the CI gap that let the PB7 `devpassword` drift reach the
+  published artifact undetected (Audit Run 34/35, PB6/PB7/INF2). The test also
+  asserts the INF9 `POSTGRES_PORT` parity invariant so future divergent re-syncs
+  fail CI here.
+
 ### Added
 
 - `tests/bootstrap-handoff-static.sh` pins the public installer bootstrap

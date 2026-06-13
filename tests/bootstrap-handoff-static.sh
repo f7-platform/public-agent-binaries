@@ -126,6 +126,40 @@ assert_contains \
   'FSEVEN_LICENSE_PUB_KEY: "${FSEVEN_LICENSE_PUB_KEY:-}"' \
   'compose license public key propagation'
 
+# PB7 / INF2 / INF3 (Run 34 / Run 35): the published compose MUST fail closed on
+# a missing POSTGRES_PASSWORD. The controller source-of-truth removed the
+# `${POSTGRES_PASSWORD:-devpassword}` weak default and adopted the `:?` form;
+# the public copy lagged by a month and re-shipped the weak credential, which
+# this static test did NOT catch (PB6 root cause). Assert the fail-closed form
+# is present and the weak default is absent so the drift can never recur silently.
+assert_contains \
+  "$ROOT_DIR/docker-compose.yml" \
+  'POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:?' \
+  'PB7: postgres password fails closed (no weak default)'
+assert_not_contains \
+  "$ROOT_DIR/docker-compose.yml" \
+  'POSTGRES_PASSWORD:-devpassword' \
+  'PB7: weak devpassword default removed'
+# NOTE: DATABASE_URL keeps the controller source-of-truth `${POSTGRES_PASSWORD:-}`
+# form verbatim (INF9 parity). That empty fallback is NOT fail-open here: the
+# postgres service above aborts `docker compose up` via the `:?` form before the
+# controller can connect, so a missing password can never reach the DB. Asserting
+# the postgres `:?` invariant (above) is the correct gate; diverging DATABASE_URL
+# from the source of truth would itself reintroduce INF9 drift.
+
+# INF9 (Run 34 / Run 35): the published compose must stay in parity with the
+# controller source-of-truth. The drift the audit flagged was a missing
+# POSTGRES_PORT host-port override and stale env-doc header. Assert the
+# parity-relevant invariants so a future divergent re-sync fails CI here.
+assert_contains \
+  "$ROOT_DIR/docker-compose.yml" \
+  '${POSTGRES_BIND:-127.0.0.1}:${POSTGRES_PORT:-5432}:5432' \
+  'INF9: POSTGRES_PORT host-port override (controller parity)'
+assert_contains \
+  "$ROOT_DIR/docker-compose.yml" \
+  'published mirror of fseven-controller/docker-compose.yml' \
+  'INF9: compose declares itself a synced mirror of the source of truth'
+
 assert_contains \
   "$ROOT_DIR/README.md" \
   'curl -fsSLO "$release_base/$asset.sha256"' \
@@ -202,6 +236,31 @@ if command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; 
     "$rendered_compose" \
     'DATABASE_URL: postgres://seven:test-postgres-password@postgres:5432/seven_controller' \
     'rendered compose database password propagation'
+  # INF9: the default host port for Postgres must render to 5432 (POSTGRES_PORT
+  # override defaulting), matching the controller source-of-truth compose.
+  # `docker compose config` emits the long-form port mapping.
+  assert_contains \
+    "$rendered_compose" \
+    'host_ip: 127.0.0.1' \
+    'rendered compose default POSTGRES_BIND host_ip'
+  assert_contains \
+    "$rendered_compose" \
+    'published: "5432"' \
+    'rendered compose default POSTGRES_PORT host mapping'
+
+  # PB7 / INF2: with POSTGRES_PASSWORD unset, the published compose must fail
+  # closed — `docker compose config` must error out rather than render a
+  # passwordless / weak-default Postgres. This is the runtime invariant whose
+  # absence let the PB7 devpassword drift reach CI undetected (PB6).
+  if (
+        cd "$ROOT_DIR"
+        ADMIN_API_KEY='test-admin-key' \
+          docker compose --profile community config >/dev/null 2>&1
+     ); then
+    printf 'PB7: compose rendered WITHOUT POSTGRES_PASSWORD (expected fail-closed)\n' >&2
+    exit 1
+  fi
+  printf 'PB7: compose fails closed when POSTGRES_PASSWORD is unset (verified)\n'
 else
   printf 'docker compose not available; skipped rendered compose contract\n'
 fi

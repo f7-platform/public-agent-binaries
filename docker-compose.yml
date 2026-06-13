@@ -13,16 +13,36 @@
 #
 # Environment (typically written to `.env` by install.sh / install.ps1):
 #   POSTGRES_PASSWORD           — REQUIRED for every profile; no default.
-#                                 Compose fails closed if unset (PB7). install.sh
-#                                 generates a strong password; for local dev copy
-#                                 .env.example to .env.
+#                                 docker compose fails closed (errors out) when
+#                                 it is unset so a missing secret can never fall
+#                                 back to a weak credential (Audit Run 34/35,
+#                                 INF2/INF3/PB7). install.sh generates a strong
+#                                 password on first run; for local dev copy
+#                                 .env.example (which carries a throwaway value).
 #   ADMIN_API_KEY               — required when the controller service runs
-#   CONTROLLER_JWT_PRIVATE_KEY  — optional (controller generates on boot
-#                                 if unset)
+#   CREDENTIAL_ENCRYPTION_KEY   — required 64-char hex key for encrypting
+#                                 telemetry HMAC keys + integration secrets
+#                                 (install.sh generates one)
+#   CONTROLLER_JWT_PRIVATE_KEY  — optional (controller generates an ephemeral
+#                                 key on boot if unset; community installs leave
+#                                 it unset, so sessions reset on restart — PB4)
+#   FSEVEN_LICENSE_PUB_KEY      — optional for community; required for
+#                                 production license signature verification
+#                                 (base64 raw Ed25519 public key)
 #   CONTROLLER_IMAGE            — image reference (default pulls from GHCR)
 #   PORT                        — host port for the controller (default 8080)
+#   POSTGRES_PORT               — host port for Postgres (default 5432)
+#   POSTGRES_BIND               — host bind address for Postgres
+#                                 (default 127.0.0.1; set 0.0.0.0 for remote)
 #   DEPLOYMENT_MODE             — "Community" | "Cloud". install.sh writes
 #                                 Community; cloud operators set Cloud.
+#
+# This file is the published mirror of fseven-controller/docker-compose.yml,
+# resynced verbatim on each controller release tag (release.yml). The env
+# contract above must stay in parity with that source of truth; INF9 (Audit
+# Run 34/35) tracks the drift, and tests/bootstrap-handoff-static.sh asserts
+# the security-relevant invariants (fail-closed POSTGRES_PASSWORD, POSTGRES_PORT
+# override, credential/license key propagation) so parity gaps fail CI here.
 
 services:
   # Postgres — used by every profile. Community + prod require a strong
@@ -39,8 +59,10 @@ services:
     ports:
       # Bind to loopback by default — community deployments don't need
       # remote DB access. Operators who do can override with
-      # POSTGRES_BIND=0.0.0.0 in .env.
-      - "${POSTGRES_BIND:-127.0.0.1}:5432:5432"
+      # POSTGRES_BIND=0.0.0.0 in .env. The host port is overridable via
+      # POSTGRES_PORT (parity with the controller source-of-truth compose,
+      # INF9) so a host where 5432 is already in use can remap it.
+      - "${POSTGRES_BIND:-127.0.0.1}:${POSTGRES_PORT:-5432}:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
