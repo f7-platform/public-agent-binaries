@@ -251,6 +251,35 @@ assert_not_contains \
   'OPENFGA_PLAYGROUND_ENABLED: "true"' \
   'INF5/PB9: OpenFGA playground is not hardcoded enabled'
 
+# PB6 (Run 34/35/36, Maintainability): this static gate is the ONLY automated
+# check that catches compose drift between releases, and it previously did not
+# assert the post-CD10 parity surface — which is exactly how PB8 (owner-role
+# serving) and PB9 (hardcoded-true playground) entered main undetected. The four
+# post-CD10 parity invariants are now each asserted above; this block fails the
+# gate if any of them is silently removed, so a regression to PB8/PB9/INF4/INF5
+# cannot re-enter without tripping a PB6-named guard. (Assertions for each live in
+# the PB8 + INF5/PB9 blocks above; this is the consolidated completeness check.)
+#   (a) serving DATABASE_URL binds the least-privilege fseven_app role
+assert_contains \
+  "$ROOT_DIR/docker-compose.yml" \
+  'DATABASE_URL: "postgres://fseven_app:${FSEVEN_APP_DB_PASSWORD:?' \
+  'PB6: gate covers post-CD10 serving-role parity (fseven_app DATABASE_URL)'
+#   (b) owner role retained on a distinct fail-closed DATABASE_ADMIN_URL
+assert_contains \
+  "$ROOT_DIR/docker-compose.yml" \
+  'DATABASE_ADMIN_URL: "postgres://seven:${POSTGRES_PASSWORD:?' \
+  'PB6: gate covers post-CD10 owner-role parity (distinct DATABASE_ADMIN_URL)'
+#   (c) fseven_app password propagated fail-closed to the controller service
+assert_contains \
+  "$ROOT_DIR/docker-compose.yml" \
+  'FSEVEN_APP_DB_PASSWORD: "${FSEVEN_APP_DB_PASSWORD:?' \
+  'PB6: gate covers post-CD10 app-password parity (FSEVEN_APP_DB_PASSWORD)'
+#   (d) OpenFGA playground uses the defaulted-false form
+assert_contains \
+  "$ROOT_DIR/docker-compose.yml" \
+  'OPENFGA_PLAYGROUND_ENABLED: "${OPENFGA_PLAYGROUND_ENABLED:-false}"' \
+  'PB6: gate covers post-CD10 OpenFGA-playground parity (defaulted-false)'
+
 assert_contains \
   "$ROOT_DIR/README.md" \
   'curl -fsSLO "$release_base/$asset.sha256"' \
