@@ -236,6 +236,21 @@ assert_contains \
   'published mirror of fseven-controller/docker-compose.yml' \
   'INF9: compose declares itself a synced mirror of the source of truth'
 
+# INF5 (Run 34) / PB9 (Run 36): the OpenFGA playground exposes the authorization-
+# model editing UI and must never ship enabled in the prod profile. The controller
+# source-of-truth defaults it OFF (`${OPENFGA_PLAYGROUND_ENABLED:-false}`); the
+# published mirror had drifted to a hardcoded "true". Assert the defaulted-false
+# form is present and the hardcoded-true form is absent so the drift can never
+# re-enter undetected.
+assert_contains \
+  "$ROOT_DIR/docker-compose.yml" \
+  'OPENFGA_PLAYGROUND_ENABLED: "${OPENFGA_PLAYGROUND_ENABLED:-false}"' \
+  'INF5/PB9: OpenFGA playground defaults to OFF (opt-in only)'
+assert_not_contains \
+  "$ROOT_DIR/docker-compose.yml" \
+  'OPENFGA_PLAYGROUND_ENABLED: "true"' \
+  'INF5/PB9: OpenFGA playground is not hardcoded enabled'
+
 assert_contains \
   "$ROOT_DIR/README.md" \
   'curl -fsSLO "$release_base/$asset.sha256"' \
@@ -340,6 +355,31 @@ if command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; 
     "$rendered_compose" \
     'published: "5432"' \
     'rendered compose default POSTGRES_PORT host mapping'
+
+  # INF5 / PB9: render the `prod` profile (which includes the openfga service) and
+  # assert the OpenFGA playground resolves to OFF by default. The community profile
+  # does not start openfga, so this needs its own render. A future regression to a
+  # hardcoded `true` (or a defaulted-true form) would render the model editor
+  # enabled here and fail this assertion.
+  rendered_prod_compose="$(mktemp)"
+  trap 'rm -f "$rendered_compose" "$rendered_prod_compose"' EXIT
+  (
+    cd "$ROOT_DIR"
+    POSTGRES_PASSWORD='test-postgres-password' \
+      FSEVEN_APP_DB_PASSWORD='test-app-db-password' \
+      ADMIN_API_KEY='test-admin-key' \
+      CREDENTIAL_ENCRYPTION_KEY='0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef' \
+      FSEVEN_LICENSE_PUB_KEY='test-license-public-key' \
+      docker compose --profile prod config > "$rendered_prod_compose"
+  )
+  assert_contains \
+    "$rendered_prod_compose" \
+    'OPENFGA_PLAYGROUND_ENABLED: "false"' \
+    'INF5/PB9: rendered prod-profile OpenFGA playground defaults OFF'
+  assert_not_contains \
+    "$rendered_prod_compose" \
+    'OPENFGA_PLAYGROUND_ENABLED: "true"' \
+    'INF5/PB9: rendered prod-profile OpenFGA playground is not enabled by default'
 
   # PB7 / INF2: with POSTGRES_PASSWORD unset, the published compose must fail
   # closed — `docker compose config` must error out rather than render a

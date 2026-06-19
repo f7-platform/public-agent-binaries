@@ -154,7 +154,15 @@ services:
       OPENFGA_DATASTORE_ENGINE: postgres
       OPENFGA_DATASTORE_URI: "postgres://seven:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required and has no default}@postgres:5432/seven_controller"
       OPENFGA_LOG_LEVEL: "info"
-      OPENFGA_PLAYGROUND_ENABLED: "true"
+      # INF5 (Audit Run 34) / PB9 (Audit Run 36): the playground exposes the
+      # authorization-model editing UI and must never be reachable in production.
+      # The controller source-of-truth compose defaults this OFF; this published
+      # mirror had drifted to a hardcoded "true", so an operator running
+      # `--profile prod` started OpenFGA with the model editor enabled (network-
+      # reachable if OPENFGA_BIND=0.0.0.0). Default to OFF and require an explicit
+      # opt-in for local dev (`OPENFGA_PLAYGROUND_ENABLED=true` in your shell/.env)
+      # rather than shipping it enabled in the prod profile.
+      OPENFGA_PLAYGROUND_ENABLED: "${OPENFGA_PLAYGROUND_ENABLED:-false}"
     ports:
       - "${OPENFGA_BIND:-127.0.0.1}:8082:8080"
       - "${OPENFGA_BIND:-127.0.0.1}:8083:8081"
