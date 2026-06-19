@@ -149,9 +149,33 @@ CREDENTIAL_ENCRYPTION_KEY=$CredentialEncryptionKey
 "@
         Write-Step "Added missing CREDENTIAL_ENCRYPTION_KEY to existing .env"
     }
+    # Backfill FSEVEN_APP_DB_PASSWORD for installs that predate the CD10 RLS
+    # serving-role cutover (Audit Run 35, CD10; synced to the published compose by
+    # Audit Run 36, PB8). The updated compose binds the controller serving pool to
+    # the least-privilege fseven_app role via DATABASE_URL=fseven_app:${FSEVEN_APP_DB_PASSWORD:?}
+    # — without this secret `docker compose up` fails closed. The controller
+    # provisions + verifies the role from this password at startup, so generating a
+    # fresh one here is safe. POSTGRES_PASSWORD is never regenerated. Mirrors install.sh.
+    if ($existing -notmatch '(?m)^FSEVEN_APP_DB_PASSWORD=') {
+        $FsevenAppDbPassword = New-Secret
+        $timestamp = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
+        Add-Content -Path $EnvFile -Value @"
+
+# Added by install.ps1 on $timestamp for the CD10 RLS serving-role cutover (PB8).
+# Password for the least-privilege fseven_app DB role.
+FSEVEN_APP_DB_PASSWORD=$FsevenAppDbPassword
+"@
+        Write-Step "Added missing FSEVEN_APP_DB_PASSWORD to existing .env"
+    }
 } else {
     Write-Step "Generating .env with fresh secrets"
     $PostgresPassword        = New-Secret
+    # Password for the least-privilege fseven_app DB role used by the controller
+    # serving pool after the CD10 RLS serving-role cutover (Audit Run 35, CD10;
+    # synced into the published compose by Audit Run 36, PB8). The compose binds
+    # DATABASE_URL to fseven_app:${FSEVEN_APP_DB_PASSWORD:?}, so a missing value
+    # fails `docker compose up` closed — generate a strong one here.
+    $FsevenAppDbPassword     = New-Secret
     $AdminApiKey             = New-Secret
     $CredentialEncryptionKey = New-Secret
     $timestamp = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
@@ -160,6 +184,7 @@ CREDENTIAL_ENCRYPTION_KEY=$CredentialEncryptionKey
 # Do not commit this file. Back it up — POSTGRES_PASSWORD is required
 # to decrypt the database and is never regenerated on re-run.
 POSTGRES_PASSWORD=$PostgresPassword
+FSEVEN_APP_DB_PASSWORD=$FsevenAppDbPassword
 ADMIN_API_KEY=$AdminApiKey
 CREDENTIAL_ENCRYPTION_KEY=$CredentialEncryptionKey
 DEPLOYMENT_MODE=Community

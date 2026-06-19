@@ -58,6 +58,23 @@ assert_contains \
   'Added missing CREDENTIAL_ENCRYPTION_KEY to existing .env' \
   'existing .env credential key backfill'
 
+# PB8 (Run 36): install.sh must generate FSEVEN_APP_DB_PASSWORD (fresh installs)
+# and backfill it on existing .env files that predate the CD10 cutover. Without
+# the secret the updated compose fails closed and the controller cannot provision
+# the least-privilege fseven_app role.
+assert_contains \
+  "$ROOT_DIR/install.sh" \
+  'FSEVEN_APP_DB_PASSWORD="$(gen_secret)"' \
+  'PB8: install.sh generates a strong fseven_app DB password'
+assert_contains \
+  "$ROOT_DIR/install.sh" \
+  'FSEVEN_APP_DB_PASSWORD=${FSEVEN_APP_DB_PASSWORD}' \
+  'PB8: install.sh writes FSEVEN_APP_DB_PASSWORD to .env'
+assert_contains \
+  "$ROOT_DIR/install.sh" \
+  'Added missing FSEVEN_APP_DB_PASSWORD to existing .env' \
+  'PB8: install.sh backfills FSEVEN_APP_DB_PASSWORD on existing .env'
+
 # PD2 (Run 28 / Run 29): public-agent-binaries does not ship a Dockerfile or
 # controller source. install.sh must NOT attempt a local docker-compose build
 # fallback when image pull fails — that path always fails and misleads
@@ -104,6 +121,23 @@ assert_contains \
   "$ROOT_DIR/install.ps1" \
   'Added missing CREDENTIAL_ENCRYPTION_KEY to existing .env' \
   'PowerShell existing .env credential key backfill'
+
+# PB8 (Run 36): install.ps1 (Windows community installs) must mirror install.sh —
+# generate FSEVEN_APP_DB_PASSWORD on fresh installs and backfill it on existing
+# .env files predating the CD10 cutover, so Windows installs are not left on the
+# owner-role BYPASSRLS path.
+assert_contains \
+  "$ROOT_DIR/install.ps1" \
+  '$FsevenAppDbPassword     = New-Secret' \
+  'PB8: install.ps1 generates a strong fseven_app DB password'
+assert_contains \
+  "$ROOT_DIR/install.ps1" \
+  'FSEVEN_APP_DB_PASSWORD=$FsevenAppDbPassword' \
+  'PB8: install.ps1 writes FSEVEN_APP_DB_PASSWORD to .env'
+assert_contains \
+  "$ROOT_DIR/install.ps1" \
+  'Added missing FSEVEN_APP_DB_PASSWORD to existing .env' \
+  'PB8: install.ps1 backfills FSEVEN_APP_DB_PASSWORD on existing .env'
 assert_contains \
   "$ROOT_DIR/install.ps1" \
   'Existing .env PORT detected; using port $Port' \
@@ -140,12 +174,37 @@ assert_not_contains \
   "$ROOT_DIR/docker-compose.yml" \
   'POSTGRES_PASSWORD:-devpassword' \
   'PB7: weak devpassword default removed'
-# NOTE: DATABASE_URL keeps the controller source-of-truth `${POSTGRES_PASSWORD:-}`
-# form verbatim (INF9 parity). That empty fallback is NOT fail-open here: the
-# postgres service above aborts `docker compose up` via the `:?` form before the
-# controller can connect, so a missing password can never reach the DB. Asserting
-# the postgres `:?` invariant (above) is the correct gate; diverging DATABASE_URL
-# from the source of truth would itself reintroduce INF9 drift.
+
+# PB8 (Run 36): the CD10 RLS serving-role cutover (Run 35) was never synced into
+# this published compose, so the controller booted as the OWNER role `seven`
+# (BYPASSRLS) with an empty-password fallback — silently bypassing all CD10 RLS
+# enforcement on every community install. The source-of-truth controller compose
+# binds the serving pool to the least-privilege `fseven_app` role over
+# DATABASE_URL and keeps the owner role on a separate DATABASE_ADMIN_URL. Assert
+# the cutover form so the owner-role regression can never re-enter undetected.
+# (The controller falls into main.rs:987-996 "legacy single-role" warning path —
+# connecting as owner — only when DATABASE_URL == DATABASE_ADMIN_URL, i.e. when
+# the app role is NOT distinct; these assertions guarantee it stays distinct.)
+assert_contains \
+  "$ROOT_DIR/docker-compose.yml" \
+  'DATABASE_URL: "postgres://fseven_app:${FSEVEN_APP_DB_PASSWORD:?' \
+  'PB8: controller serving pool connects as least-privilege fseven_app role (fail-closed)'
+assert_not_contains \
+  "$ROOT_DIR/docker-compose.yml" \
+  'DATABASE_URL: "postgres://seven:' \
+  'PB8: serving DATABASE_URL no longer uses the owner role (BYPASSRLS regression removed)'
+assert_not_contains \
+  "$ROOT_DIR/docker-compose.yml" \
+  'DATABASE_URL: "postgres://seven:${POSTGRES_PASSWORD:-}@' \
+  'PB8: empty-password owner-role serving fallback removed'
+assert_contains \
+  "$ROOT_DIR/docker-compose.yml" \
+  'DATABASE_ADMIN_URL: "postgres://seven:${POSTGRES_PASSWORD:?' \
+  'PB8: owner role retained on a distinct fail-closed DATABASE_ADMIN_URL (migrations/bootstrap)'
+assert_contains \
+  "$ROOT_DIR/docker-compose.yml" \
+  'FSEVEN_APP_DB_PASSWORD: "${FSEVEN_APP_DB_PASSWORD:?' \
+  'PB8: fseven_app role password propagated fail-closed to the controller service'
 
 # INF9 (Run 34 / Run 35): the published compose must stay in parity with the
 # controller source-of-truth. The drift the audit flagged was a missing
@@ -219,6 +278,7 @@ if command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; 
   (
     cd "$ROOT_DIR"
     POSTGRES_PASSWORD='test-postgres-password' \
+      FSEVEN_APP_DB_PASSWORD='test-app-db-password' \
       ADMIN_API_KEY='test-admin-key' \
       CREDENTIAL_ENCRYPTION_KEY='0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef' \
       FSEVEN_LICENSE_PUB_KEY='test-license-public-key' \
@@ -232,10 +292,26 @@ if command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; 
     "$rendered_compose" \
     'FSEVEN_LICENSE_PUB_KEY: test-license-public-key' \
     'rendered compose license public key'
+  # PB8: the rendered serving DATABASE_URL must resolve to the least-privilege
+  # fseven_app role (NOT the owner role `seven`), and the owner role must stay on
+  # a DISTINCT DATABASE_ADMIN_URL. If these two ever collapse to the same value
+  # the controller falls into the legacy single-role owner path (BYPASSRLS).
   assert_contains \
     "$rendered_compose" \
+    'DATABASE_URL: postgres://fseven_app:test-app-db-password@postgres:5432/seven_controller' \
+    'PB8: rendered serving DATABASE_URL uses the fseven_app role (not owner)'
+  assert_not_contains \
+    "$rendered_compose" \
     'DATABASE_URL: postgres://seven:test-postgres-password@postgres:5432/seven_controller' \
-    'rendered compose database password propagation'
+    'PB8: rendered serving DATABASE_URL is not the owner role'
+  assert_contains \
+    "$rendered_compose" \
+    'DATABASE_ADMIN_URL: postgres://seven:test-postgres-password@postgres:5432/seven_controller' \
+    'PB8: rendered DATABASE_ADMIN_URL keeps the owner role for migrations/bootstrap'
+  assert_contains \
+    "$rendered_compose" \
+    'FSEVEN_APP_DB_PASSWORD: test-app-db-password' \
+    'PB8: rendered compose propagates the fseven_app role password'
   # INF9: the default host port for Postgres must render to 5432 (POSTGRES_PORT
   # override defaulting), matching the controller source-of-truth compose.
   # `docker compose config` emits the long-form port mapping.
@@ -261,6 +337,23 @@ if command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; 
     exit 1
   fi
   printf 'PB7: compose fails closed when POSTGRES_PASSWORD is unset (verified)\n'
+
+  # PB8 (Run 36): with POSTGRES_PASSWORD SET but FSEVEN_APP_DB_PASSWORD UNSET, the
+  # published compose must still fail closed — the serving DATABASE_URL and the
+  # FSEVEN_APP_DB_PASSWORD env both use the `:?` form, so `docker compose config`
+  # must error rather than render an empty serving credential. This is the runtime
+  # invariant that guarantees a pre-CD10 .env (POSTGRES_PASSWORD only) cannot
+  # silently start the controller on the owner-role bypass path.
+  if (
+        cd "$ROOT_DIR"
+        POSTGRES_PASSWORD='test-postgres-password' \
+          ADMIN_API_KEY='test-admin-key' \
+          docker compose --profile community config >/dev/null 2>&1
+     ); then
+    printf 'PB8: compose rendered WITHOUT FSEVEN_APP_DB_PASSWORD (expected fail-closed)\n' >&2
+    exit 1
+  fi
+  printf 'PB8: compose fails closed when FSEVEN_APP_DB_PASSWORD is unset (verified)\n'
 else
   printf 'docker compose not available; skipped rendered compose contract\n'
 fi

@@ -226,11 +226,37 @@ ENV
     chmod 600 "$ENV_FILE"
     log "Added missing CREDENTIAL_ENCRYPTION_KEY to existing .env"
   fi
+  # Backfill FSEVEN_APP_DB_PASSWORD for installs that predate the CD10 RLS
+  # serving-role cutover (Audit Run 35, CD10; synced to the published compose by
+  # Audit Run 36, PB8). The updated compose binds the controller serving pool to
+  # the least-privilege `fseven_app` role via DATABASE_URL=fseven_app:${FSEVEN_APP_DB_PASSWORD:?}
+  # — without this secret `docker compose up` fails closed. The controller
+  # provisions + verifies the role from this password at startup, so generating a
+  # fresh one here is safe (no existing fseven_app credential to preserve on a
+  # pre-cutover install). POSTGRES_PASSWORD is never regenerated; only this new
+  # least-privilege secret is added.
+  if [[ -z "${FSEVEN_APP_DB_PASSWORD:-}" ]]; then
+    FSEVEN_APP_DB_PASSWORD="$(gen_secret)"
+    cat >> "$ENV_FILE" <<ENV
+
+# Added by install.sh on $(date -u +%Y-%m-%dT%H:%M:%SZ) for the CD10 RLS serving-role
+# cutover (PB8). Password for the least-privilege fseven_app DB role.
+FSEVEN_APP_DB_PASSWORD=${FSEVEN_APP_DB_PASSWORD}
+ENV
+    chmod 600 "$ENV_FILE"
+    log "Added missing FSEVEN_APP_DB_PASSWORD to existing .env"
+  fi
   FRESH_INSTALL=no
 else
   log "Generating .env with fresh secrets"
   POSTGRES_PASSWORD="$(gen_secret)"
   ADMIN_API_KEY="$(gen_secret)"
+  # Password for the least-privilege `fseven_app` DB role used by the controller
+  # serving pool after the CD10 RLS serving-role cutover (Audit Run 35, CD10/#229;
+  # synced into the published compose by Audit Run 36, PB8). The compose binds
+  # DATABASE_URL to fseven_app:${FSEVEN_APP_DB_PASSWORD:?}, so a missing value
+  # fails `docker compose up` closed — generate a strong one here.
+  FSEVEN_APP_DB_PASSWORD="$(gen_secret)"
   # Credential-encryption key is a single-line hex string — fits
   # cleanly in a docker-compose env-file. The JWT signing key, by
   # contrast, is a multi-line Ed25519 PEM which the env-file format
@@ -244,6 +270,7 @@ else
 # Do not commit this file. Back it up — POSTGRES_PASSWORD is required
 # to decrypt the database and is never regenerated on re-run.
 POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+FSEVEN_APP_DB_PASSWORD=${FSEVEN_APP_DB_PASSWORD}
 ADMIN_API_KEY=${ADMIN_API_KEY}
 CREDENTIAL_ENCRYPTION_KEY=${CREDENTIAL_ENCRYPTION_KEY}
 DEPLOYMENT_MODE=Community

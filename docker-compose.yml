@@ -19,6 +19,21 @@
 #                                 INF2/INF3/PB7). install.sh generates a strong
 #                                 password on first run; for local dev copy
 #                                 .env.example (which carries a throwaway value).
+#                                 The owner role `seven` uses this on
+#                                 DATABASE_ADMIN_URL (migrations / privileged
+#                                 bootstrap / cross-org workers).
+#   FSEVEN_APP_DB_PASSWORD      — REQUIRED for community/prod; no default.
+#                                 Password for the least-privilege `fseven_app`
+#                                 DB role (NOSUPERUSER/NOBYPASSRLS, created by
+#                                 migration 113) that the controller serving pool
+#                                 connects as over DATABASE_URL after the CD10 RLS
+#                                 serving-role cutover (Audit Run 35, CD10/#229;
+#                                 PB8 syncs it into this published mirror). The
+#                                 controller refuses to boot if the role can
+#                                 bypass RLS. `docker compose` fails closed (`:?`)
+#                                 when it is unset. install.sh generates a strong
+#                                 value on first run and backfills an existing
+#                                 .env; local dev gets a throwaway from .env.example.
 #   ADMIN_API_KEY               — required when the controller service runs
 #   CREDENTIAL_ENCRYPTION_KEY   — required 64-char hex key for encrypting
 #                                 telemetry HMAC keys + integration secrets
@@ -89,7 +104,27 @@ services:
       HOST: "0.0.0.0"
       PORT: "8080"
       DEPLOYMENT_MODE: "${DEPLOYMENT_MODE:-Community}"
-      DATABASE_URL: "postgres://seven:${POSTGRES_PASSWORD:-}@postgres:5432/seven_controller"
+      # Request-serving pool — RLS SERVING-ROLE CUTOVER (Audit Run 35, CD10/#229;
+      # synced into this published mirror by Audit Run 36, PB8). Connects as the
+      # least-privilege `fseven_app` role (NOSUPERUSER/NOBYPASSRLS, created by
+      # migration 113, provisioned + verified at startup from FSEVEN_APP_DB_PASSWORD
+      # — the controller refuses to boot if the role can bypass RLS). Every
+      # tenant-scoped request handler sets the per-request `app.current_org_id` GUC
+      # via acquire_org_scoped (#200), so FORCE RLS enforces org isolation at the DB
+      # layer; non-tenant paths (migrations, bootstrap, cross-org workers, control
+      # plane) run as the owner role over DATABASE_ADMIN_URL below. ROLLBACK: point
+      # DATABASE_URL back at the owner role `seven:${POSTGRES_PASSWORD}` and redeploy
+      # (no data migration). The `:?` fail-closed form (PB7/INF2/INF3) makes
+      # `docker compose` abort before the controller starts instead of handing it an
+      # empty credential; the prior published `${POSTGRES_PASSWORD:-}` empty default
+      # on the OWNER role was the PB8 CRITICAL — it silently bypassed CD10 RLS.
+      DATABASE_URL: "postgres://fseven_app:${FSEVEN_APP_DB_PASSWORD:?FSEVEN_APP_DB_PASSWORD is required for the RLS serving-role cutover; install.sh generates it and backfills an existing .env}@postgres:5432/seven_controller"
+      # Migrations + privileged bootstrap + cross-org workers connect as the owner
+      # role `seven` (this MUST stay the owner role for migrations/RLS-bypass paths).
+      DATABASE_ADMIN_URL: "postgres://seven:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required and has no default}@postgres:5432/seven_controller"
+      # Password for the `fseven_app` role, provisioned + verified at startup and
+      # used by the serving pool (DATABASE_URL) after the cutover above.
+      FSEVEN_APP_DB_PASSWORD: "${FSEVEN_APP_DB_PASSWORD:?FSEVEN_APP_DB_PASSWORD is required for the RLS serving-role cutover}"
       OPENFGA_API_URL: "${OPENFGA_API_URL:-}"
       DASHBOARD_DIR: "/app/dashboard/dist"
       KNOWLEDGE_MODELS_DIR: "/app/knowledge-models"
