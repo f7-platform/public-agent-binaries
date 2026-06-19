@@ -206,6 +206,23 @@ assert_contains \
   'FSEVEN_APP_DB_PASSWORD: "${FSEVEN_APP_DB_PASSWORD:?' \
   'PB8: fseven_app role password propagated fail-closed to the controller service'
 
+# INF2 (Run 34/35/36, HIGH, chronic): the serving DATABASE_URL app password MUST
+# NOT use a soft empty-string fallback. The chronic INF2 manifestation was an
+# `${...:-}` empty default on the app credential, which would boot the controller's
+# serving pool with an empty password instead of aborting. The PB8 fix moved the
+# serving pool to `postgres://fseven_app:${FSEVEN_APP_DB_PASSWORD:?...}`; this
+# assertion pins the app-password specifically to the fail-closed `:?` form and
+# forbids any `${FSEVEN_APP_DB_PASSWORD:-...}` soft fallback re-entering, so the
+# INF2 regression is owned by name in the gate (not only implied under PB8).
+assert_not_contains \
+  "$ROOT_DIR/docker-compose.yml" \
+  'fseven_app:${FSEVEN_APP_DB_PASSWORD:-' \
+  'INF2: serving app password has no soft empty-string fallback (must fail closed)'
+assert_not_contains \
+  "$ROOT_DIR/docker-compose.yml" \
+  'FSEVEN_APP_DB_PASSWORD: "${FSEVEN_APP_DB_PASSWORD:-' \
+  'INF2: fseven_app password env has no soft empty-string fallback (must fail closed)'
+
 # INF9 (Run 34 / Run 35): the published compose must stay in parity with the
 # controller source-of-truth. The drift the audit flagged was a missing
 # POSTGRES_PORT host-port override and stale env-doc header. Assert the
