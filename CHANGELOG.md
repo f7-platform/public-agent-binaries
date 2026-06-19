@@ -6,6 +6,40 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 
 ## [Unreleased]
 
+### Security
+
+- **CRITICAL (Audit Run 36, PB8):** synced the CD10 RLS serving-role cutover into
+  the published distribution artifacts. The published `docker-compose.yml`
+  controller `DATABASE_URL` now connects as the least-privilege `fseven_app` role
+  with a fail-closed password (`postgres://fseven_app:${FSEVEN_APP_DB_PASSWORD:?}@…`),
+  a distinct `DATABASE_ADMIN_URL` retains the owner role `seven` for
+  migrations/bootstrap, and the new `FSEVEN_APP_DB_PASSWORD` env is propagated —
+  matching the `fseven-controller` source-of-truth compose. Previously the
+  published serving `DATABASE_URL` used the owner role `seven`
+  (`BYPASSRLS`) with an empty-password fallback, so every `curl install.sh | bash`
+  community deploy collapsed `DATABASE_URL == DATABASE_ADMIN_URL` and silently
+  booted on the controller's legacy single-role owner path — bypassing all CD10
+  row-level-security enforcement (`FORCE RLS`, the per-request `app.current_org_id`
+  GUC, and the `fseven_app` role isolation). `install.sh` and `install.ps1` now
+  generate `FSEVEN_APP_DB_PASSWORD` on fresh installs (chmod 600) and backfill it
+  on existing `.env` files that predate the cutover (without rotating
+  `POSTGRES_PASSWORD`). `.env.example` carries a throwaway value for local dev.
+- `tests/bootstrap-handoff-static.sh` now asserts the PB8 invariants so the
+  owner-role regression cannot recur silently: the serving `DATABASE_URL` uses the
+  `fseven_app` role (fail-closed) and never the owner role; `DATABASE_ADMIN_URL`
+  keeps the owner role distinct; `FSEVEN_APP_DB_PASSWORD` is propagated to the
+  controller and generated/backfilled by both installers; and — when Docker is
+  available — the rendered compose fails closed when `FSEVEN_APP_DB_PASSWORD` is
+  unset and resolves the serving role to `fseven_app` (not `seven`).
+- `tests/bootstrap-handoff-static.sh` now asserts the compose `POSTGRES_PASSWORD`
+  fail-closed invariant — both statically (the `${POSTGRES_PASSWORD:?…}` form is
+  present and the `:-devpassword` weak default is absent) and, when Docker is
+  available, at render time (`docker compose config` errors out when the password
+  is unset). This is the CI gap that let the PB7 `devpassword` drift reach the
+  published artifact undetected (Audit Run 34/35, PB6/PB7/INF2). The test also
+  asserts the INF9 `POSTGRES_PORT` parity invariant so future divergent re-syncs
+  fail CI here.
+
 ### Changed
 
 - `docker-compose.yml` env-doc header and Postgres host-port mapping brought
@@ -15,17 +49,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
   `POSTGRES_PORT` host-port override (`${POSTGRES_BIND:-127.0.0.1}:${POSTGRES_PORT:-5432}:5432`)
   so hosts where 5432 is taken can remap without editing the file; and declares
   the file a synced mirror of its source of truth. No service topology change.
-
-### Security
-
-- `tests/bootstrap-handoff-static.sh` now asserts the compose `POSTGRES_PASSWORD`
-  fail-closed invariant — both statically (the `${POSTGRES_PASSWORD:?…}` form is
-  present and the `:-devpassword` weak default is absent) and, when Docker is
-  available, at render time (`docker compose config` errors out when the password
-  is unset). This is the CI gap that let the PB7 `devpassword` drift reach the
-  published artifact undetected (Audit Run 34/35, PB6/PB7/INF2). The test also
-  asserts the INF9 `POSTGRES_PORT` parity invariant so future divergent re-syncs
-  fail CI here.
 
 ### Added
 
