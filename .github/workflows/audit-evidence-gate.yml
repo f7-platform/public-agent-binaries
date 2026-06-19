@@ -4,14 +4,14 @@ name: Audit Evidence Gate
 # Deploy a copy of this file to each child repo at .github/workflows/audit-evidence-gate.yml.
 #
 # Two responsibilities:
-# 1. issues.closed   — auto-reopen any audit:run-N issue closed without a Mode B
-#                       evidence-table comment or an APPROVED verifier comment.
+# 1. issues.closed   — auto-reopen any audit:run-N issue closed without an
+#                       execution evidence-table comment or an APPROVED verifier comment.
 # 2. issue_comment   — when the audit-verifier agent posts a verdict=APPROVED
 #                       comment, remove status:needs-reaudit and close the issue.
 #                       verdict=REJECTED takes no automated action.
 #
-# Implements the Mode B evidence rule from
-# .github/agents/audit-sprint-action.agent.md and the verifier handoff defined
+# Implements the execution evidence rule from
+# .github/agents/issue-executor.agent.md and the verifier handoff defined
 # in .github/agents/audit-verifier.agent.md.
 
 on:
@@ -27,6 +27,12 @@ jobs:
   enforce-close:
     if: github.event_name == 'issues' && contains(join(github.event.issue.labels.*.name, ','), 'audit:run-')
     runs-on: ubuntu-latest
+    env:
+      # Actor provenance allowlist (INF1): logins trusted to satisfy the gate with
+      # an audit-verifier APPROVED verdict even when their author_association is not
+      # a repo-write association. Comma/whitespace-separated. Set per-repo or
+      # per-org via the AUDIT_VERIFIER_ALLOWLIST variable (e.g. a bot identity).
+      AUDIT_VERIFIER_ALLOWLIST: ${{ vars.AUDIT_VERIFIER_ALLOWLIST }}
     steps:
       - name: Reopen if closed without evidence
         uses: actions/github-script@v7
@@ -49,11 +55,30 @@ jobs:
               per_page: 100,
             });
 
-            const verifierApproved = comments.some(c =>
-              /<!-- audit-verifier:verdict=APPROVED -->/.test(c.body || '')
-            );
+            // Actor allowlist + provenance gate (INF1): only honor an APPROVED
+            // verdict from a trusted maintainer (OWNER/MEMBER/COLLABORATOR) or an
+            // allowlisted identity, posted in a well-formed verifier comment. A
+            // forged marker from an arbitrary commenter must not keep a
+            // manually-closed audit issue closed.
+            const TRUSTED_ASSOCIATIONS = new Set(['OWNER', 'MEMBER', 'COLLABORATOR']);
+            const verifierAllowlist = (process.env.AUDIT_VERIFIER_ALLOWLIST || '')
+              .split(/[\s,]+/)
+              .map(s => s.trim().toLowerCase())
+              .filter(Boolean);
+            const isTrustedVerifierComment = (c) => {
+              const assoc = c.author_association || 'NONE';
+              const login = (c.user?.login || '').toLowerCase();
+              return TRUSTED_ASSOCIATIONS.has(assoc) || verifierAllowlist.includes(login);
+            };
+            const verifierApproved = comments.some(c => {
+              const cb = c.body || '';
+              return /<!-- audit-verifier:verdict=APPROVED -->/.test(cb) &&
+                /<!-- audit-verifier:start -->/.test(cb) &&
+                /<!-- audit-verifier:end -->/.test(cb) &&
+                isTrustedVerifierComment(c);
+            });
             if (verifierApproved) {
-              core.info(`Issue #${issue.number} has verifier APPROVED — gate passes.`);
+              core.info(`Issue #${issue.number} has a trusted verifier APPROVED — gate passes.`);
               return;
             }
 
@@ -61,7 +86,17 @@ jobs:
             const SHA_RE = /\b[0-9a-f]{7,40}\b/i;
             const TEST_RE = /cargo (test|build)|pnpm.*test|pytest|vitest|playwright|npm test/i;
 
+            // Actor provenance on the evidence-table path (INF6): the shape
+            // checks below (status word + SHA/test token, or a long body) only
+            // verify TEXT SHAPE, not authenticity — any commenter could post a
+            // status word plus a 7-40-char hex token to forge "evidence" and keep
+            // a manually-closed audit issue closed. Require the evidence comment
+            // to come from a trusted maintainer (OWNER/MEMBER/COLLABORATOR) or an
+            // allowlisted identity, exactly as the verifier-APPROVED path does
+            // (INF1). A forged evidence comment from an untrusted author no longer
+            // satisfies the gate.
             const hasEvidence = comments.some(c => {
+              if (!isTrustedVerifierComment(c)) return false;
               const body = c.body || '';
               if (!STATUS_RE.test(body)) return false;
               if (/\b(VERIFIED|PARTIAL)\b/.test(body)) {
@@ -71,7 +106,7 @@ jobs:
             });
 
             if (hasEvidence) {
-              core.info(`Issue #${issue.number} closed with Mode B evidence — gate passes.`);
+              core.info(`Issue #${issue.number} closed with execution evidence — gate passes.`);
               return;
             }
 
@@ -101,11 +136,11 @@ jobs:
             const body = [
               '## ⚠️ Audit Evidence Gate — auto-reopened',
               '',
-              `This issue is labeled \`${auditLabel}\` but was closed without a completion comment containing the Mode B evidence table or an APPROVED audit-verifier comment.`,
+              `This issue is labeled \`${auditLabel}\` but was closed without a completion comment containing the execution evidence table or an APPROVED audit-verifier comment.`,
               '',
               'To close this issue, do one of:',
               '',
-              '- Post a Mode B completion comment with status tokens (`VERIFIED` / `PARTIAL` / `ALREADY-PRESENT` / `BLOCKED`), a commit SHA, and test/CI evidence; then close.',
+              '- Post an execution completion comment with status tokens (`VERIFIED` / `PARTIAL` / `ALREADY-PRESENT` / `BLOCKED`), a commit SHA, and test/CI evidence; then close.',
               '- Invoke the `audit-verifier` agent. When it posts `verdict=APPROVED` this workflow will close the issue automatically.',
               '- If you intentionally want to abandon this work, close as `not planned` — that path is not gated.',
             ].join('\n');
@@ -120,6 +155,12 @@ jobs:
   verifier-autoclose:
     if: github.event_name == 'issue_comment' && !github.event.issue.pull_request && contains(github.event.comment.body, '<!-- audit-verifier:verdict=APPROVED -->')
     runs-on: ubuntu-latest
+    env:
+      # Actor provenance allowlist (INF1): logins trusted to post audit-verifier
+      # verdicts even when their author_association is not a repo-write association.
+      # Comma/whitespace-separated. Set per-repo or per-org via the
+      # AUDIT_VERIFIER_ALLOWLIST variable (e.g. a bot identity).
+      AUDIT_VERIFIER_ALLOWLIST: ${{ vars.AUDIT_VERIFIER_ALLOWLIST }}
     steps:
       - name: Close on verifier approval
         uses: actions/github-script@v7
@@ -139,6 +180,33 @@ jobs:
               core.warning(`Approval marker without surrounding start/end markers on issue #${issue.number}; ignoring.`);
               return;
             }
+
+            // --- Actor allowlist + provenance gate (INF1) ---
+            // Only honor the APPROVED verdict when the comment author is a trusted
+            // maintainer (OWNER/MEMBER/COLLABORATOR association) or an explicitly
+            // allowlisted identity. This prevents any commenter from forging the
+            // <!-- audit-verifier:verdict=APPROVED --> marker to bypass the gate.
+            const TRUSTED_ASSOCIATIONS = new Set(['OWNER', 'MEMBER', 'COLLABORATOR']);
+            const allowlist = (process.env.AUDIT_VERIFIER_ALLOWLIST || '')
+              .split(/[\s,]+/)
+              .map(s => s.trim().toLowerCase())
+              .filter(Boolean);
+            const author = context.payload.comment.user?.login || '';
+            const association = context.payload.comment.author_association || 'NONE';
+            const trustedByAssociation = TRUSTED_ASSOCIATIONS.has(association);
+            const trustedByAllowlist = allowlist.includes(author.toLowerCase());
+            if (!trustedByAssociation && !trustedByAllowlist) {
+              core.warning(
+                `Ignoring audit-verifier APPROVED on issue #${issue.number}: author @${author} ` +
+                `(association=${association}) is not a trusted maintainer and is not in ` +
+                `AUDIT_VERIFIER_ALLOWLIST; refusing to auto-close.`
+              );
+              return;
+            }
+            core.info(
+              `Verifier APPROVED on issue #${issue.number} accepted from @${author} ` +
+              `(association=${association}, allowlisted=${trustedByAllowlist}).`
+            );
 
             if (labels.includes('status:needs-reaudit')) {
               try {
