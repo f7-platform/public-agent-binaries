@@ -23,6 +23,11 @@ name: static-checks
 # closes the last of those: several PB4 assertions (the rendered-PEM round-trips and
 # the Ed25519 key-validity checks) used to no-op with no guard at all whenever
 # python3/openssl were absent.
+#
+# The ubuntu job runs install.ps1 under PowerShell Core on LINUX, where
+# Protect-FilePath takes its `chmod` branch — it proves the ordering logic and
+# explicitly NOT the Windows ACL logic. PB5's actual home (Get-Acl/Set-Acl) needs a
+# Windows runner, so `install-ps1-acl-windows` below is a second, non-optional job.
 
 on:
   pull_request:
@@ -59,3 +64,20 @@ jobs:
 
       - name: Installer / compose contract gate
         run: bash tests/bootstrap-handoff-static.sh
+
+  # PB5 is a WINDOWS ACL finding — Get-Acl/Set-Acl, and the fact that a new file on
+  # Windows inherits the ACL of the CONTAINING DIRECTORY rather than that of the file
+  # it was copied from. That code had never executed in CI: this repo had no
+  # windows-latest job at all, so the Windows half of PB5 was asserted-by-construction
+  # while the ubuntu job exercised only Protect-FilePath's `chmod` branch. Run the real
+  # install.ps1 on a real Windows runner, in a deliberately permissive directory, and
+  # assert on the resulting ACL and on the creation-time ORDER of the restrictions.
+  # No Docker and no network needed: -ProvisionEnvOnly is the .env writer end-to-end.
+  install-ps1-acl-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: install.ps1 Windows ACL gate (PB5)
+        shell: pwsh
+        run: ./tests/install-ps1-acl-windows.ps1

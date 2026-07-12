@@ -358,6 +358,20 @@ assert_contains \
   "$ROOT_DIR/install.sh" \
   'mv "$ENV_FILE.pb4.bak" "$ENV_FILE"' \
   'PB4: .env is restored if the compose build cannot parse the multi-line PEM'
+
+# PB5 (Run 37): the signal handlers guarding the .env.pb4.bak window must TERMINATE
+# the script. Bash runs an INT/TERM/HUP handler and then RESUMES at the next command,
+# so a handler that only deletes the backup swallows the operator's Ctrl-C and carries
+# on to `docker compose pull`/`up`. Structural guard; the behavioural proof is the
+# abort scenarios (a real signal, delivered inside the window).
+assert_contains \
+  "$ROOT_DIR/install.sh" \
+  'pb4_backup_abort INT 130' \
+  'PB5: SIGINT inside the backup window aborts the install (does not clean up and continue)'
+assert_not_contains \
+  "$ROOT_DIR/install.sh" \
+  "trap 'rm -f \"\$ENV_FILE.pb4.bak\"' EXIT INT TERM HUP" \
+  'PB5: the backup trap no longer swallows Ctrl-C/SIGTERM/SIGHUP'
 assert_contains \
   "$ROOT_DIR/docker-compose.yml" \
   'CONTROLLER_JWT_PRIVATE_KEY: "${CONTROLLER_JWT_PRIVATE_KEY:-}"' \
@@ -760,10 +774,24 @@ make_docker_stub() {
   # project's .env, which is only enough to let the installer proceed — the
   # AUTHORITATIVE proof that a PEM survives Compose's dotenv parser is the
   # round-trip test above, which uses the real `docker compose` directly.
+  #
+  # Three test hooks, each of which drives a real code path in the installers that
+  # was previously only grep-asserted:
+  #   * FSEVEN_DOCKER_LOG        — record every subcommand, so a scenario can assert
+  #                                what the installer did or did NOT go on to do
+  #                                (e.g. that an aborted install never reached `pull`).
+  #   * FSEVEN_TEST_CONFIG_NO_PEM — render a compose WITHOUT the PEM, which fails the
+  #                                installers' own render check and forces the ROLLBACK
+  #                                branch (install.sh `mv` / install.ps1 `Move-Item`)
+  #                                to actually execute.
+  #   * FSEVEN_TEST_CONFIG_HANG   — announce, then block, INSIDE the .env.pb4.bak
+  #                                window, so a scenario can deliver a real signal
+  #                                while the plaintext secret copy is on disk.
   local stub="$1/docker"
   cat > "$stub" <<'STUB'
 #!/usr/bin/env bash
 set -u
+if [[ -n "${FSEVEN_DOCKER_LOG:-}" ]]; then printf '%s\n' "$*" >> "$FSEVEN_DOCKER_LOG"; fi
 [[ "${1:-}" == "info" ]]   && exit 0
 [[ "${1:-}" == "volume" ]] && exit 1   # never report a stale volume
 [[ "${1:-}" != "compose" ]] && exit 0
@@ -779,6 +807,22 @@ done
 case "$sub" in
   version) echo 'Docker Compose version v2.0.0-stub' ;;
   config)
+    if [[ -n "${FSEVEN_TEST_CONFIG_HANG:-}" ]]; then
+      # We are now INSIDE the installer's backup window: .env.pb4.bak (a full
+      # plaintext copy of every secret in .env) is on disk. Tell the scenario, then
+      # block until it releases us — bounded, so a broken scenario cannot hang CI.
+      : > "$FSEVEN_TEST_CONFIG_HANG"
+      for _ in $(seq 1 400); do
+        [[ -e "$FSEVEN_TEST_CONFIG_HANG.release" ]] && break
+        sleep 0.05
+      done
+    fi
+    if [[ "${FSEVEN_TEST_CONFIG_NO_PEM:-0}" == "1" ]]; then
+      # A compose build whose dotenv parser cannot represent the multi-line PEM:
+      # renders fine, but CONTROLLER_JWT_PRIVATE_KEY is not in the output.
+      printf 'services:\n  controller:\n    environment:\n      DEPLOYMENT_MODE: Community\n'
+      exit 0
+    fi
     if [[ -n "${FSEVEN_REAL_DOCKER:-}" && -x "${FSEVEN_REAL_DOCKER:-}" ]]; then
       "$FSEVEN_REAL_DOCKER" compose --profile community config
     else
@@ -1103,6 +1147,166 @@ fi
 assert_no_backup_left "$sh_crash" 'install.sh (killed inside the backup window)'
 printf 'PB5: install.sh leaves no .env.pb4.bak secret copy behind when it dies mid-window (verified)\n'
 
+# ── Scenario 5: the operator ABORTS inside the backup window (SIGINT/TERM/HUP) ──
+# The crash scenario above fault-injects a FAILING COMMAND. The comment on the trap
+# also claims Ctrl-C and SIGTERM coverage — and that half was asserted, never
+# exercised. It was also WRONG: bash runs an INT/TERM/HUP handler and then RESUMES
+# at the next command, so `trap 'rm -f …' EXIT INT TERM HUP` deleted the backup and
+# then carried straight on to `docker compose pull` / `up`. Ctrl-C aborted the
+# install BEFORE that trap existed and was SWALLOWED after it. The handler has to
+# terminate the script itself.
+#
+# So: send the installer a REAL signal while it is genuinely inside the window (the
+# docker stub blocks there, with .env.pb4.bak on disk), and require BOTH halves —
+#   (a) the secret copy is gone            (the leak criterion), and
+#   (b) the installer ACTUALLY ABORTED     (the operator's abort is honoured):
+#       it exits 128+signum and never reaches `docker compose pull` / `up`.
+#
+# `set -m` is load-bearing: a command started asynchronously by a NON-interactive
+# shell inherits SIGINT/SIGQUIT as SIG_IGN, and a signal ignored on entry cannot be
+# trapped — without job control the INT would never be delivered and this scenario
+# would be testing nothing. (It would fail loudly rather than pass vacuously, but it
+# would be measuring the harness, not the installer.)
+sig_launcher="$scenario_root/launch-install-sh.sh"
+cat > "$sig_launcher" <<LAUNCH
+#!/usr/bin/env bash
+umask 000
+exec bash "$ROOT_DIR/install.sh" "\$@"
+LAUNCH
+chmod +x "$sig_launcher"
+
+run_abort_scenario() {
+  # $1 = signal name, $2 = expected exit status (128 + signum)
+  local sig="$1" expect_rc="$2"
+  local dir="$scenario_root/sh-abort-$sig"
+  local out="$scenario_root/sh-out-abort-$sig.txt"
+  local marker="$scenario_root/abort-$sig.in-window"
+  local dockerlog="$scenario_root/abort-$sig.docker.log"
+  rm -f "$marker" "$marker.release"
+  : > "$dockerlog"
+
+  set +e
+  set -m   # job control: do NOT let the async installer inherit SIG_IGN for INT
+  PATH="$stub_bin:$PATH" \
+  FSEVEN_REAL_DOCKER="$REAL_DOCKER" \
+  FSEVEN_DOCKER_LOG="$dockerlog" \
+  FSEVEN_TEST_CONFIG_HANG="$marker" \
+  FSEVEN_TEST_BOOTSTRAP_READY=no \
+  FSEVEN_TEST_HEALTHCHECK=no \
+  FSEVEN_BOOTSTRAP_TIMEOUT_SECS=2 \
+  FSEVEN_RELEASE_MANIFEST_URL="file:///nonexistent-fseven-release-manifest.json" \
+  FSEVEN_COMPOSE_URL="file://$ROOT_DIR/docker-compose.yml" \
+  FSEVEN_COMPOSE_SHA256="$COMPOSE_SHA256" \
+    bash "$sig_launcher" --dir "$dir" --no-agent > "$out" 2>&1 &
+  local pid=$!
+  set +m
+
+  # Wait until the installer is demonstrably inside the window.
+  local waited=0
+  while [[ ! -e "$marker" ]]; do
+    sleep 0.05
+    waited=$((waited + 1))
+    if [[ "$waited" -gt 400 ]]; then
+      printf 'PB5 [%s]: install.sh never reached the .env.pb4.bak window — scenario would be vacuous\n' "$sig" >&2
+      cat "$out" >&2
+      kill -KILL "$pid" 2>/dev/null
+      exit 1
+    fi
+  done
+
+  # VACUITY GUARD: the secret copy must really be on disk at the moment we signal,
+  # or "no backup left afterwards" proves nothing.
+  if [[ ! -e "$dir/.env.pb4.bak" ]]; then
+    printf 'PB5 [%s]: .env.pb4.bak was not on disk at signal time — scenario would be vacuous\n' "$sig" >&2
+    kill -KILL "$pid" 2>/dev/null
+    exit 1
+  fi
+
+  kill -"$sig" "$pid"
+  : > "$marker.release"          # let the blocked `docker compose config` return
+  wait "$pid"
+  local rc=$?
+  set -e
+
+  # (a) the leak criterion
+  assert_no_backup_left "$dir" "install.sh (SIG$sig inside the backup window)"
+
+  # (b) the ABORT criterion — the half PR #31 broke.
+  if [[ "$rc" -ne "$expect_rc" ]]; then
+    printf 'PB5 [%s]: install.sh exited %s, expected %s (128+signum).\n' "$sig" "$rc" "$expect_rc" >&2
+    printf '     The signal handler cleaned up and RESUMED instead of aborting: bash runs an\n' >&2
+    printf '     INT/TERM/HUP handler and then continues at the next command. The operator asked\n' >&2
+    printf '     for the install to STOP and it carried on regardless.\n' >&2
+    cat "$out" >&2
+    exit 1
+  fi
+  if grep -Eq '(^| )(pull|up)( |$)' "$dockerlog"; then
+    printf 'PB5 [%s]: install.sh went on to run `docker compose %s` AFTER the operator aborted it.\n' \
+      "$sig" "$(grep -Eo '(pull|up)' "$dockerlog" | head -1)" >&2
+    printf '     Signal handlers must terminate the script, not fall through to the next step.\n' >&2
+    cat "$dockerlog" >&2
+    exit 1
+  fi
+  printf 'PB5: install.sh aborts (rc=%s) and leaves no secret copy when SIG%s lands in the backup window (verified)\n' \
+    "$rc" "$sig"
+}
+
+run_abort_scenario INT  130
+run_abort_scenario TERM 143
+run_abort_scenario HUP  129
+
+# ── Scenario 6: the compose build CANNOT parse the PEM => ROLLBACK executes ──────
+# The rollback (`mv "$ENV_FILE.pb4.bak" "$ENV_FILE"`) is the safety net for the whole
+# PB4 fix: if this machine's compose cannot render a multi-line PEM, the installer
+# must put the previous .env back and degrade to the old behaviour rather than ship a
+# broken key. Until now NOTHING forced the render check to fail, so the `mv` never
+# executed in any test — it was asserted only by grepping install.sh for the string.
+# Force it: the stub renders a compose with no PEM in it.
+sh_rollback="$scenario_root/sh-rollback"
+sh_out5="$scenario_root/sh-out-5.txt"
+rollback_log="$scenario_root/sh-rollback.docker.log"
+: > "$rollback_log"
+(
+  umask 000
+  PATH="$stub_bin:$PATH" \
+  FSEVEN_REAL_DOCKER="" \
+  FSEVEN_DOCKER_LOG="$rollback_log" \
+  FSEVEN_TEST_CONFIG_NO_PEM=1 \
+  FSEVEN_TEST_BOOTSTRAP_READY=yes \
+  FSEVEN_TEST_HEALTHCHECK=no \
+  FSEVEN_BOOTSTRAP_TIMEOUT_SECS=2 \
+  FSEVEN_RELEASE_MANIFEST_URL="file:///nonexistent-fseven-release-manifest.json" \
+  FSEVEN_COMPOSE_URL="file://$ROOT_DIR/docker-compose.yml" \
+  FSEVEN_COMPOSE_SHA256="$COMPOSE_SHA256" \
+    bash "$ROOT_DIR/install.sh" --dir "$sh_rollback" --no-agent
+) > "$sh_out5" 2>&1
+
+assert_output_contains "$sh_out5" 'could not render a multi-line PEM' \
+  'PB4: install.sh took the rollback branch when the compose build could not parse the PEM'
+# The rollback must leave a WORKING .env: the half-written key removed, every other
+# secret intact, still 0600, and the install must go on to start the stack.
+if grep -q '^CONTROLLER_JWT_PRIVATE_KEY=' "$sh_rollback/.env"; then
+  printf 'PB4: rollback did not restore .env — the unrenderable key is still in it\n' >&2
+  exit 1
+fi
+for key in POSTGRES_PASSWORD FSEVEN_APP_DB_PASSWORD ADMIN_API_KEY CREDENTIAL_ENCRYPTION_KEY; do
+  if ! grep -q "^$key=" "$sh_rollback/.env"; then
+    printf 'PB4: rollback destroyed .env — %s is gone. The rollback must restore the PREVIOUS .env, not truncate it\n' "$key" >&2
+    exit 1
+  fi
+done
+sh_rollback_mode="$(file_mode "$sh_rollback/.env")"
+if [[ "$sh_rollback_mode" != "600" ]]; then
+  printf 'PB5: .env is mode %s after the rollback mv (expected 600)\n' "$sh_rollback_mode" >&2
+  exit 1
+fi
+assert_no_backup_left "$sh_rollback" 'install.sh (rollback branch)'
+if ! grep -Eq '(^| )up( |$)' "$rollback_log"; then
+  printf 'PB4: install.sh did not continue to `docker compose up` after the rollback — a compose-parser gap must DEGRADE, not break the install\n' >&2
+  exit 1
+fi
+printf 'PB4: install.sh rolls .env back (mv) and degrades to the controller-generated key when compose cannot parse the PEM (verified)\n'
+
 # ── install.ps1 scenarios (Windows parity) ──────────────────────────────────
 # install.ps1 is the file the Run-34/36 PB3+PB4+PB5 work never touched. Windows
 # is a first-class community-install target, so its installer gets the same
@@ -1112,8 +1316,10 @@ printf 'PB5: install.sh leaves no .env.pb4.bak secret copy behind when it dies m
 # ORDERING (restrict-then-write), the key generation, the .env serialization and
 # the per-branch scrub guidance are all executed for real here. The Windows-only
 # ACL API (Get-Acl/Set-Acl) cannot execute off Windows — on this path the
-# equivalent chmod is exercised instead. The ACL code itself remains unverified
-# by CI and is called out as such in the PR.
+# equivalent chmod is exercised instead. The ACL code itself is covered by
+# tests/install-ps1-acl-windows.ps1, which runs the same installer on a
+# windows-latest runner (see .github/workflows/static-checks.yml); it is NOT
+# covered by anything in this file.
 if command -v pwsh >/dev/null 2>&1; then
   run_install_ps1() {
     local dir="$1" ready="$2" healthcheck="$3" timeout="$4" out="$5"
@@ -1276,6 +1482,122 @@ PY
   assert_restricted_while_empty "$ps_trace" "$ps_order/.env" '.env'
   assert_restricted_while_empty "$ps_trace" "$ps_order/.env.pb4.bak" '.env.pb4.bak (a full copy of every secret in .env)'
   assert_no_backup_left "$ps_order" 'install.ps1 (-ProvisionEnvOnly)'
+
+  # ── PB5 (install.ps1): the UPGRADE path, which assert_restricted_while_empty
+  # cannot see ─────────────────────────────────────────────────────────────────
+  # assert_restricted_while_empty only inspects the FIRST restriction of a path, so
+  # it says nothing about a file that is appended to LATER. Add-SecretLines was
+  # AppendAllText-then-Protect-FilePath, i.e. write-then-restrict — safe only by the
+  # assumption "the .env is already restricted". That assumption is FALSE on the
+  # upgrade path: install.ps1 :372/:389 append a freshly minted
+  # CREDENTIAL_ENCRYPTION_KEY / FSEVEN_APP_DB_PASSWORD to a `.env` written by an
+  # OLDER installer — one created before the PB5 fix, at the install directory's
+  # inherited ACL / ambient umask. The new secret therefore landed in a
+  # world-readable file and was tightened afterwards: PB5, on the upgrade path.
+  #
+  # Final mode CANNOT catch this (Add-SecretLines re-asserts the restriction after
+  # the append, so it still ends at 0600). Only ORDER can. The invariant: the first
+  # restriction of the pre-existing .env must happen BEFORE the new secret is
+  # appended, i.e. while the file is still its ORIGINAL size.
+  file_size() {
+    if stat -c '%s' "$1" >/dev/null 2>&1; then stat -c '%s' "$1"; else stat -f '%z' "$1"; fi
+  }
+
+  ps_upgrade="$scenario_root/ps-upgrade"
+  ps_upgrade_trace="$scenario_root/ps-upgrade-trace.txt"
+  mkdir -p "$ps_upgrade"
+  : > "$ps_upgrade_trace"
+  # A .env as an OLDER (pre-PB5) install.ps1 left it: world-readable, and missing
+  # both keys the upgrade path backfills.
+  cat > "$ps_upgrade/.env" <<'OLDENV'
+# Generated by an older install.ps1
+POSTGRES_PASSWORD=legacy-postgres-password
+ADMIN_API_KEY=legacy-admin-api-key
+DEPLOYMENT_MODE=Community
+PORT=8080
+OLDENV
+  chmod 666 "$ps_upgrade/.env"
+  ps_upgrade_size="$(file_size "$ps_upgrade/.env")"
+
+  (
+    umask 000
+    PATH="$trace_bin:$PATH" \
+    FSEVEN_CHMOD_TRACE="$ps_upgrade_trace" \
+      pwsh -NoProfile -File "$ROOT_DIR/install.ps1" -InstallDir "$ps_upgrade" -ProvisionEnvOnly
+  ) > "$scenario_root/ps-out-upgrade.txt" 2>&1
+
+  # Vacuity guards: the upgrade path must actually have run (both keys backfilled)
+  # and the interception must have fired.
+  for key in CREDENTIAL_ENCRYPTION_KEY FSEVEN_APP_DB_PASSWORD CONTROLLER_JWT_PRIVATE_KEY; do
+    if ! grep -q "^$key=" "$ps_upgrade/.env"; then
+      printf 'PB5: install.ps1 -ProvisionEnvOnly did not backfill %s on the upgrade path — the ordering proof below would be vacuous\n' "$key" >&2
+      cat "$scenario_root/ps-out-upgrade.txt" >&2
+      exit 1
+    fi
+  done
+  if ! grep -Fq "$ps_upgrade/.env|" "$ps_upgrade_trace"; then
+    printf 'PB5: install.ps1 never restricted the pre-existing .env on the upgrade path — it keeps the older installer'"'"'s world-readable mode/ACL, with a freshly-minted CREDENTIAL_ENCRYPTION_KEY and FSEVEN_APP_DB_PASSWORD in it\n' >&2
+    exit 1
+  fi
+
+  ps_upgrade_first="$(awk -F'|' -v p="$ps_upgrade/.env" '$1 == p { print $2; exit }' "$ps_upgrade_trace")"
+  if [[ "$ps_upgrade_first" -gt "$ps_upgrade_size" ]]; then
+    printf 'PB5: install.ps1 restricted the pre-existing .env only AFTER appending to it (%s bytes at first restriction, %s bytes before the append).\n' \
+      "$ps_upgrade_first" "$ps_upgrade_size" >&2
+    printf '     The upgrade path (install.ps1 :372 CREDENTIAL_ENCRYPTION_KEY, :389 FSEVEN_APP_DB_PASSWORD) appends a freshly minted\n' >&2
+    printf '     secret to a .env an OLDER installer created world-readable, and tightens it afterwards. That is write-then-restrict — PB5.\n' >&2
+    printf '     Restrict in Add-SecretLines BEFORE the AppendAllText.\n' >&2
+    exit 1
+  fi
+  ps_upgrade_mode="$(file_mode "$ps_upgrade/.env")"
+  if [[ "$ps_upgrade_mode" != "600" ]]; then
+    printf 'PB5: install.ps1 left the upgraded .env at mode %s (expected 600)\n' "$ps_upgrade_mode" >&2
+    exit 1
+  fi
+  assert_no_backup_left "$ps_upgrade" 'install.ps1 (upgrade path)'
+  printf 'PB5: install.ps1 restricts a pre-existing world-readable .env BEFORE appending new secrets to it (verified)\n'
+
+  # ── PB4 (install.ps1): the ROLLBACK branch actually EXECUTES ────────────────
+  # `Move-Item -Path $backup -Destination $EnvFile -Force` was only ever grep-asserted
+  # (tests/bootstrap-handoff-static.sh :390): no scenario made the render check fail,
+  # so the Windows rollback never ran in any test. Force it.
+  ps_rollback="$scenario_root/ps-rollback"
+  ps_out_rb="$scenario_root/ps-out-rollback.txt"
+  mkdir -p "$ps_rollback"
+  cp "$ROOT_DIR/docker-compose.yml" "$ps_rollback/docker-compose.yml"
+  (
+    umask 000
+    PATH="$stub_bin:$PATH" \
+    FSEVEN_REAL_DOCKER="" \
+    FSEVEN_TEST_CONFIG_NO_PEM=1 \
+    FSEVEN_TEST_BOOTSTRAP_READY=yes \
+    FSEVEN_TEST_HEALTHCHECK=no \
+    FSEVEN_BOOTSTRAP_TIMEOUT_SECS=2 \
+    FSEVEN_RELEASE_MANIFEST_URL="file:///nonexistent-fseven-release-manifest.json" \
+    FSEVEN_COMPOSE_URL="file://$ROOT_DIR/docker-compose.yml" \
+    FSEVEN_COMPOSE_SHA256="$COMPOSE_SHA256" \
+      pwsh -NoProfile -File "$ROOT_DIR/install.ps1" -InstallDir "$ps_rollback" -NoAgent
+  ) > "$ps_out_rb" 2>&1
+
+  assert_output_contains "$ps_out_rb" 'could not render a multi-line PEM' \
+    'PB4: install.ps1 took the rollback branch when the compose build could not parse the PEM'
+  if grep -q '^CONTROLLER_JWT_PRIVATE_KEY=' "$ps_rollback/.env"; then
+    printf 'PB4: install.ps1 rollback did not restore .env — the unrenderable key is still in it\n' >&2
+    exit 1
+  fi
+  for key in POSTGRES_PASSWORD FSEVEN_APP_DB_PASSWORD ADMIN_API_KEY CREDENTIAL_ENCRYPTION_KEY; do
+    if ! grep -q "^$key=" "$ps_rollback/.env"; then
+      printf 'PB4: install.ps1 rollback destroyed .env — %s is gone. Move-Item must restore the PREVIOUS .env, not truncate it\n' "$key" >&2
+      exit 1
+    fi
+  done
+  ps_rb_mode="$(file_mode "$ps_rollback/.env")"
+  if [[ "$ps_rb_mode" != "600" ]]; then
+    printf 'PB5: install.ps1 .env is mode %s after the rollback Move-Item (expected 600)\n' "$ps_rb_mode" >&2
+    exit 1
+  fi
+  assert_no_backup_left "$ps_rollback" 'install.ps1 (rollback branch)'
+  printf 'PB4: install.ps1 rolls .env back (Move-Item) and degrades to the controller-generated key when compose cannot parse the PEM (verified)\n'
 elif [[ "${FSEVEN_REQUIRE_PWSH:-0}" == "1" ]]; then
   # As with docker: CI sets FSEVEN_REQUIRE_PWSH=1 so the Windows-parity half can
   # never silently no-op. A skipped check is how install.ps1 drifted a whole

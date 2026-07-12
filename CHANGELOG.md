@@ -8,6 +8,50 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 
 ### Security
 
+- **(Audit Run 37, PB5 — the `.env.pb4.bak` secret copy):** *this entry is the record
+  of a security fix that shipped without one.* To provision the PB4 JWT key, both
+  installers take a rollback copy of `.env` — `.env.pb4.bak`, a **full plaintext copy
+  of every secret in it** (`POSTGRES_PASSWORD`, `FSEVEN_APP_DB_PASSWORD`,
+  `ADMIN_API_KEY`, `CREDENTIAL_ENCRYPTION_KEY`, and the JWT PEM on a re-run). On
+  Windows that copy was taken with `Copy-Item` and restricted *afterwards*: a new file
+  on Windows inherits the ACL of the **containing directory**, not the ACL of the file
+  it was copied from, so every secret in `.env` was readable by other local users for
+  the whole window until `Set-Acl` ran — the exact write-then-restrict TOCTOU that PB5
+  names, re-created on the backup. `install.ps1` now copies through `Copy-SecretFile`
+  (create empty → restrict → stream bytes), and both installers remove the copy on
+  **every** exit path, including the error path. The proof is creation-time, not
+  final-mode (see the corrected PB5 entry below).
+- **(Audit Run 37, PB5 — the abort handler swallowed Ctrl-C):** the trap that cleans up
+  `.env.pb4.bak` was `trap 'rm -f …' EXIT INT TERM HUP`, which **is not an abort**.
+  Bash runs an `INT`/`TERM`/`HUP` handler and then *resumes at the next command*, so
+  the handler deleted the backup and carried straight on to `docker compose pull` /
+  `up`. Ctrl-C during that window aborted the install *before* the cleanup trap existed
+  and was **ignored after it** — a behavioural regression introduced by the fix. The
+  handlers now clean up, restore the signal's default disposition and re-raise, so the
+  installer really dies (exit 130/143/129) and the operator's abort is honoured. The
+  contract tests now **send real signals** to a running installer while the secret copy
+  is on disk and assert both halves — the copy is gone *and* the install stopped
+  (`tests/bootstrap-handoff-static.sh`, "operator ABORTS inside the backup window").
+- **(Audit Run 37, PB5 — the upgrade path):** `install.ps1`'s `Add-SecretLines` was
+  append-then-restrict. That is safe only under the assumption "`.env` is already
+  restricted", which is **false on the upgrade path**: `install.ps1` backfills a freshly
+  minted `CREDENTIAL_ENCRYPTION_KEY` / `FSEVEN_APP_DB_PASSWORD` into a `.env` written by
+  an *older* installer — one created before the PB5 fix, at the install directory's
+  inherited ACL. The new secret therefore landed in a world-readable file and was
+  tightened afterwards. `Add-SecretLines` now restricts **before** the append. Final
+  mode cannot catch this class of bug (the restriction is re-asserted after the write,
+  so it still ends at 0600); the new contract test asserts the *order* instead.
+- **(Audit Run 37, PB5 — Windows is now actually executed in CI):** the `Get-Acl` /
+  `Set-Acl` code that is PB5's real home had **never run in CI** — this repository had
+  no `windows-latest` job at all, so the Windows half of the finding was
+  asserted-by-construction. `static-checks.yml` gains a `windows-latest` job that runs
+  the real `install.ps1`, in a directory deliberately made permissive
+  (`BUILTIN\Users` granted an inheritable Read), and asserts on the **resulting ACL**:
+  inheritance is disabled and no `Users` / `Authenticated Users` / `Everyone` ACE
+  survives on `.env`. It also intercepts `Set-Acl` to record the file's size at each
+  restriction and requires the **first** restriction of `.env` and of `.env.pb4.bak` to
+  happen while the file is still empty — the Windows equivalent of the POSIX
+  creation-time proof.
 - **(Audit Run 34/36, INF5/PB9):** the published `docker-compose.yml` no longer
   hardcodes `OPENFGA_PLAYGROUND_ENABLED: "true"`. The OpenFGA playground is an
   authorization-model *editing* UI and must never ship enabled; the controller
@@ -71,9 +115,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
   all four secrets were world-readable in between; `install.ps1` did the same with
   `Set-Content` at the inherited directory ACL. `install.sh` now sets `umask 077`
   before it creates any file, and `install.ps1` creates `.env` empty, restricts it
-  to the current user, and only then writes the secrets into it. The contract
-  tests run both installers under a hostile `umask 000` and assert the resulting
-  files are 0600.
+  to the current user, and only then writes the secrets into it.
+
+  *Correction (Audit Run 37): this entry previously offered as its proof that "the
+  contract tests run both installers under a hostile `umask 000` and assert the
+  resulting files are 0600". That is a **final-mode** check, and it cannot establish
+  this invariant — a write-then-restrict regression also ends at 0600, because both
+  installers re-assert the restriction after writing. It was not evidence for the fix.
+  The invariant is proven at **creation time** instead: for `install.sh`, the fetched
+  `docker-compose.yml` is never `chmod`-ed, so its being 0600 under a hostile
+  `umask 000` proves `umask 077` was in force when files were **created**; for
+  `install.ps1`, the restriction call is intercepted and the file's size recorded at
+  each call, and the **first** restriction of every secret file must happen while it is
+  still empty. The entry also never mentioned `.env.pb4.bak` — a second file holding a
+  full plaintext copy of every secret in `.env` — which is covered by the PB5 entries at
+  the top of this section.*
 - **(Audit Run 34/37, PB5):** the agent enrollment seed
   (`/etc/fseven/enrollment-seed.toml`, single-use 1h-TTL token) is *created*
   mode-0600 (`install -m 0600 /dev/null`) before the token is written into it.
