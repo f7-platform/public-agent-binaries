@@ -6,9 +6,20 @@ name: static-checks
 # nothing ran it: this repo had no pull-request workflow at all, so every
 # assertion in it was advisory. Run it on every PR and on main.
 #
-# GitHub-hosted runners ship Docker, so the rendered-compose half of the gate
-# (fail-closed POSTGRES_PASSWORD / FSEVEN_APP_DB_PASSWORD, prod-profile OpenFGA
-# playground, PB4 PEM rendering) executes here too, not just the static half.
+# GitHub-hosted runners ship Docker AND PowerShell, so the gate's behavioural
+# halves execute here, not just the `grep`-the-source half:
+#   * the rendered-compose contract (fail-closed POSTGRES_PASSWORD /
+#     FSEVEN_APP_DB_PASSWORD, prod-profile OpenFGA playground),
+#   * the PB4 round-trip — a real multi-line Ed25519 PEM written by the real
+#     installers, rendered by the real `docker compose`, and required to reach
+#     the container's environment byte-for-byte intact,
+#   * the install.sh AND install.ps1 behaviour scenarios (PB3 scrub guidance on
+#     every branch, PB5 restricted-before-write .env).
+#
+# FSEVEN_REQUIRE_DOCKER / FSEVEN_REQUIRE_PWSH make the gate FAIL rather than
+# skip if either tool is missing from the runner. A check that silently skips is
+# not a check — that is precisely how PB4 stayed open on Windows for three audit
+# runs while CI was green.
 
 on:
   pull_request:
@@ -22,6 +33,9 @@ permissions:
 jobs:
   bootstrap-handoff-static:
     runs-on: ubuntu-latest
+    env:
+      FSEVEN_REQUIRE_DOCKER: '1'
+      FSEVEN_REQUIRE_PWSH: '1'
     steps:
       - uses: actions/checkout@v4
 
@@ -29,6 +43,15 @@ jobs:
         run: |
           bash -n install.sh
           bash -n tests/bootstrap-handoff-static.sh
+
+      - name: PowerShell syntax
+        shell: pwsh
+        run: |
+          $errors = $null
+          [System.Management.Automation.Language.Parser]::ParseFile(
+            (Resolve-Path ./install.ps1), [ref]$null, [ref]$errors) | Out-Null
+          if ($errors) { $errors | ForEach-Object { Write-Host $_ }; exit 1 }
+          Write-Host 'install.ps1 parses clean'
 
       - name: Installer / compose contract gate
         run: bash tests/bootstrap-handoff-static.sh
