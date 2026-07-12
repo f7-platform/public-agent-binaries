@@ -25,8 +25,29 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
   the only automated check that catches compose drift between releases, and its
   coverage gap is how PB8 (owner-role serving credentials) and PB9 (hardcoded-true
   playground) both reached the published artifact undetected.
-- **(Audit Run 34/37, PB4):** `install.sh` now provisions a **persistent** Ed25519
-  JWT signing key (`CONTROLLER_JWT_PRIVATE_KEY`) into `.env` (chmod 600) instead
+- **(Audit Run 37, PB4 — Windows parity):** `install.ps1` now provisions the same
+  **persistent** Ed25519 JWT signing key that `install.sh` does. The Run-34/36 fix
+  landed on `install.sh` only and `install.ps1` was never touched, so *every
+  Windows community install still booted the controller on a self-generated
+  **ephemeral** signing key* — the exact defect PB4 names — while the entry below
+  claimed the finding was fixed. It was not, on Windows. Windows cannot shell out
+  to `openssl` (it is not present) and neither .NET Framework 4.x (PowerShell 5.1)
+  nor .NET 8 exposes an Ed25519 API, so `install.ps1` constructs the PKCS#8
+  document directly from the fixed RFC 8410 §7 prefix plus 32 CSPRNG bytes; the
+  contract tests feed the result to `openssl pkey` to prove it really is a valid
+  Ed25519 private key.
+- **(Audit Run 37, PB4 — evidence):** the behaviour the whole PB4 fix rests on —
+  a multi-line Ed25519 PEM surviving Compose v2's dotenv parser — was **never
+  tested**. Every PB4 assertion was a `grep` for source text in `install.sh`, and
+  the "rendered compose" half of the gate never rendered a PEM at all, so a
+  parser mismatch would have shipped a broken key to every self-hoster silently.
+  `tests/bootstrap-handoff-static.sh` now takes the `.env` each installer
+  *actually writes*, renders it with the real `docker compose`, reads
+  `CONTROLLER_JWT_PRIVATE_KEY` back out of the controller's container environment,
+  and requires it to be byte-for-byte the key on disk, still multi-line, and still
+  parseable by `openssl`.
+- **(Audit Run 34/36/37, PB4):** `install.sh` provisions a **persistent** Ed25519
+  JWT signing key (`CONTROLLER_JWT_PRIVATE_KEY`) into `.env` (0600) instead
   of leaving the controller to generate its own. On the published controller
   image the self-generated key is *ephemeral* — the controller logs
   `generating ephemeral key (tokens won't survive restart)` — so every
@@ -34,25 +55,43 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
   bearer token. The historical blocker (a multi-line Ed25519 PEM "cannot be
   represented in a compose env-file") does not hold: Compose v2's dotenv parser
   accepts multi-line double-quoted values and renders them as a YAML block
-  scalar. The installer nevertheless **verifies** the key renders through
-  `docker compose config` before keeping it and restores the previous `.env` if
+  scalar. Both installers **verify** the key renders through
+  `docker compose config` before keeping it and restore the previous `.env` if
   it does not, so a compose-parser gap degrades to the previous behaviour rather
   than breaking the install. An existing `CONTROLLER_JWT_PRIVATE_KEY` is never
   rotated. Scope note: admin dashboard sessions use an opaque DB-backed
   `fseven_session` cookie and were never affected by the ephemeral key — the
   blast radius was agent tokens only (the Run-34 description overstated it).
+- **(Audit Run 37, PB5 — the `.env` window):** the Run-34 fix closed the
+  create-then-`chmod` race on the agent enrollment seed but left it **wide open on
+  `.env`**, which by then held `POSTGRES_PASSWORD`, `FSEVEN_APP_DB_PASSWORD`,
+  `ADMIN_API_KEY` and `CREDENTIAL_ENCRYPTION_KEY` (and, after the PB4 fix, the JWT
+  private key). `install.sh` wrote `.env` with `cat >` at the **ambient umask**
+  (typically 0644) and only `chmod 600`-ed it afterwards, so on a multi-user host
+  all four secrets were world-readable in between; `install.ps1` did the same with
+  `Set-Content` at the inherited directory ACL. `install.sh` now sets `umask 077`
+  before it creates any file, and `install.ps1` creates `.env` empty, restricts it
+  to the current user, and only then writes the secrets into it. The contract
+  tests run both installers under a hostile `umask 000` and assert the resulting
+  files are 0600.
 - **(Audit Run 34/37, PB5):** the agent enrollment seed
-  (`/etc/fseven/enrollment-seed.toml`, single-use 1h-TTL token) is now *created*
+  (`/etc/fseven/enrollment-seed.toml`, single-use 1h-TTL token) is *created*
   mode-0600 (`install -m 0600 /dev/null`) before the token is written into it.
   The previous create-at-umask-then-`chmod` sequence left the token briefly
   world-readable between the write and the `chmod`.
-- **(Audit Run 34/37, PB3):** after a successful first login the installer now
-  tells the operator to delete the controller's one-time bootstrap credentials
-  file (`/app/model-storage/bootstrap/secrets.env`), which is written in
-  cleartext into the `model-storage` volume. The write itself is controller-side
-  and remains outside this repository; newer controller builds delete the file
-  automatically on the first admin login, but the currently published image
-  predates that change.
+- **(Audit Run 34/37, PB3):** both installers now tell the operator to delete the
+  controller's one-time bootstrap credentials file
+  (`/app/model-storage/bootstrap/secrets.env`), which is written in cleartext into
+  the `model-storage` volume, **on every branch that can leave that file on disk** —
+  the successful-bootstrap path, the re-run path, and the bootstrap-timeout path.
+  The Run-34 fix printed the guidance only on the happy path, while the re-run and
+  timeout branches went on telling the operator how to *reveal* the password and
+  never to delete it, and `install.ps1` carried no scrub guidance at all — so the
+  previous unqualified claim that "the installer now tells the operator to delete
+  the file" was untrue for Windows and for two of three branches on Linux/macOS.
+  The write itself is controller-side and remains outside this repository; newer
+  controller builds delete the file automatically on the first admin login, but
+  the currently published image predates that change.
 - **CRITICAL (Audit Run 36, PB8):** synced the CD10 RLS serving-role cutover into
   the published distribution artifacts. The published `docker-compose.yml`
   controller `DATABASE_URL` now connects as the least-privilege `fseven_app` role

@@ -30,6 +30,21 @@
 # ─────────────────────────────────────────────────────────────────────
 set -euo pipefail
 
+# ── PB5 (Audit Run 34/37): restrict the creation mode of every file ──
+# This script writes POSTGRES_PASSWORD, FSEVEN_APP_DB_PASSWORD, ADMIN_API_KEY,
+# CREDENTIAL_ENCRYPTION_KEY and the CONTROLLER_JWT_PRIVATE_KEY PEM into `.env`.
+# Previously `.env` was created with `cat >` at the AMBIENT umask (typically 022
+# => 0644) and only chmod'ed to 0600 afterwards, so on a multi-user host every
+# one of those secrets was world-readable for the window between the write and
+# the chmod. Setting the umask HERE — before any file is created — closes that
+# window for every file this script writes (.env, the fetched compose file, temp
+# files), rather than trying to remember a chmod at each call site.
+#
+# The explicit `chmod 600 "$ENV_FILE"` calls below are retained: umask only
+# constrains the mode of files this script CREATES, so a `.env` left behind
+# world-readable by an older installer still has to be tightened on re-run.
+umask 077
+
 # ── Defaults ─────────────────────────────────────────────────────────
 INSTALL_DIR="${PWD}/fseven"
 CONTROLLER_IMAGE_DEFAULT="ghcr.io/f7-platform/public-agent-binaries/controller:latest"
@@ -426,8 +441,13 @@ docker compose --profile community up -d
 # final step of first-run bootstrap. Polling for that file is more
 # reliable than grepping the log stream (which has a race against the
 # 60 s deadline on slow machines / fresh DB migrations).
-log "Waiting for first-run bootstrap (up to 120 s)…"
-DEADLINE=$(( $(date +%s) + 120 ))
+# FSEVEN_BOOTSTRAP_TIMEOUT_SECS: how long to wait for first-run bootstrap.
+# Raise it on slow machines / cold DB migrations; lower it to reach the
+# "bootstrap did not complete" branch quickly (the installer contract tests
+# exercise that branch with a 2 s deadline).
+BOOTSTRAP_TIMEOUT_SECS="${FSEVEN_BOOTSTRAP_TIMEOUT_SECS:-120}"
+log "Waiting for first-run bootstrap (up to ${BOOTSTRAP_TIMEOUT_SECS} s)…"
+DEADLINE=$(( $(date +%s) + BOOTSTRAP_TIMEOUT_SECS ))
 SECRETS_PATH="/app/model-storage/bootstrap/secrets.env"
 ADMIN_EMAIL=""
 BOOTSTRAP_READY="no"
@@ -453,6 +473,23 @@ while [[ $(date +%s) -lt $DEADLINE ]]; do
 done
 
 # ── Step 6. Print URLs + credentials ─────────────────────────────────
+# PB3 (Audit Run 34/37): the controller writes the one-time bootstrap password
+# in CLEARTEXT to `secrets.env` on the model-storage volume. Newer controller
+# builds delete it on the first successful admin login; the published `:latest`
+# (v0.2.2) image predates that, so the installer must tell the operator to scrub
+# it. The Run-34 fix printed this guidance ONLY on the happy path — but the
+# credential is on disk on EVERY branch that reaches here (a re-run and a
+# bootstrap-timeout both leave the same cleartext file behind, and both of those
+# branches told the operator how to REVEAL the password while never telling them
+# to delete it). Emit it from one function called by every branch so the
+# guidance cannot drift back out of one of them.
+print_scrub_guidance() {
+  printf '  \033[1;33m→ After you have logged in, delete the one-time credentials file\n'
+  printf '    (the bootstrap password is stored in cleartext at rest):\033[0m\n'
+  printf '       docker compose exec controller rm -f %s\n' "$SECRETS_PATH"
+  printf '     (newer controller images remove it automatically on first login)\n\n'
+}
+
 DASHBOARD_URL="http://localhost:${CONTROLLER_PORT}"
 printf '\n\033[1;32m✓\033[0m fseven controller is running at %s\n\n' "$DASHBOARD_URL"
 if [[ "$BOOTSTRAP_READY" == "yes" ]]; then
@@ -463,26 +500,20 @@ if [[ "$BOOTSTRAP_READY" == "yes" ]]; then
   printf '\n  Reveal the one-time password only when ready to log in:\n'
   printf '    docker compose exec controller sh -lc '\''grep ^FSEVEN_BOOTSTRAP_ADMIN_PASSWORD= %s | cut -d= -f2-'\''\n\n' "$SECRETS_PATH"
   printf '  \033[1;33m→ Log in once, then rotate the password under Admin → Profile.\033[0m\n'
-  # PB3 (Audit Run 34/37): the bootstrap password is written by the controller
-  # in cleartext to the model-storage volume. Newer controller builds delete
-  # the file on the first successful admin login; the published `:latest`
-  # (v0.2.2) image predates that, so tell the operator how to scrub it. Doing
-  # it AFTER a successful login is safe — the file is a one-time handoff, not a
-  # recovery credential.
-  printf '  \033[1;33m→ Then delete the one-time credentials file (it is cleartext at rest):\033[0m\n'
-  printf '       docker compose exec controller rm -f %s\n' "$SECRETS_PATH"
-  printf '     (newer controller images remove it automatically on first login)\n\n'
+  print_scrub_guidance
 elif [[ "$FRESH_INSTALL" == "no" ]]; then
   printf 'Dashboard:  %s\n' "$DASHBOARD_URL"
   printf '(Bootstrap credentials are only shown on demand; retrieve the one-time password with:\n'
   printf '   docker compose exec controller sh -lc '\''grep ^FSEVEN_BOOTSTRAP_ADMIN_PASSWORD= %s | cut -d= -f2-'\''\n' "$SECRETS_PATH"
   printf ' if you still have the model-storage volume.)\n\n'
+  print_scrub_guidance
 else
   # Fresh install but bootstrap did not complete within the deadline.
-  printf '\033[1;33m⚠ Bootstrap did not complete within 120 s.\033[0m\n'
+  printf '\033[1;33m⚠ Bootstrap did not complete within %s s.\033[0m\n' "$BOOTSTRAP_TIMEOUT_SECS"
   printf 'Check logs:  docker compose logs controller\n'
   printf 'Once bootstrap finishes, get credentials with:\n'
   printf '   docker compose exec controller sh -lc '\''grep ^FSEVEN_BOOTSTRAP_ADMIN_PASSWORD= %s | cut -d= -f2-'\''\n\n' "$SECRETS_PATH"
+  print_scrub_guidance
 fi
 
 # ── Step 7. Self-observer chaining (PR-19) ───────────────────────────
