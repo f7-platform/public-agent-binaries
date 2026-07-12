@@ -373,6 +373,16 @@ if ! grep -q '^CONTROLLER_JWT_PRIVATE_KEY=' "$ENV_FILE"; then
   if command -v openssl >/dev/null 2>&1; then
     JWT_PEM="$(openssl genpkey -algorithm ed25519 2>/dev/null || true)"
     if [[ "$JWT_PEM" == *"BEGIN PRIVATE KEY"* ]]; then
+      # PB5 (Audit Run 37): .env.pb4.bak is a FULL PLAINTEXT COPY of every secret in
+      # .env — POSTGRES_PASSWORD, FSEVEN_APP_DB_PASSWORD, ADMIN_API_KEY,
+      # CREDENTIAL_ENCRYPTION_KEY, and the JWT PEM on a re-run. `umask 077` (top of
+      # file) means it is CREATED 0600, so unlike the Windows path it is never
+      # world-readable — but if this script dies in the window below (any command
+      # failing under `set -e`, Ctrl-C, SIGTERM) the copy is left behind on disk
+      # permanently, long after the installer that knew it was temporary is gone.
+      # Armed BEFORE the cp so even a failing cp is covered; disarmed after the
+      # rm/mv below has done its job.
+      trap 'rm -f "$ENV_FILE.pb4.bak"' EXIT INT TERM HUP
       cp "$ENV_FILE" "$ENV_FILE.pb4.bak"
       {
         printf '\n# Added by install.sh on %s — persistent Ed25519 JWT signing\n' \
@@ -396,6 +406,8 @@ if ! grep -q '^CONTROLLER_JWT_PRIVATE_KEY=' "$ENV_FILE"; then
          its own signing key; on controller images ≤ v0.2.2 that key is ephemeral,
          so agent bearer tokens are invalidated on every restart (PB4)."
       fi
+      # Window closed: the backup is gone on both branches (rm / mv).
+      trap - EXIT INT TERM HUP
     else
       warn "openssl could not generate an Ed25519 key — skipping persistent JWT key (PB4)."
     fi

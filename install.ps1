@@ -148,6 +148,34 @@ function Add-SecretLines([string]$Path, [string]$Content) {
     Protect-FilePath $Path
 }
 
+function Copy-SecretFile([string]$Source, [string]$Destination) {
+    # PB5 (Audit Run 37): copy a file that CONTAINS SECRETS without ever exposing
+    # them.
+    #
+    # `Copy-Item` must NOT be used for this. The destination is a NEW file, and
+    # Windows gives a new file the INHERITABLE ACL of the CONTAINING DIRECTORY —
+    # it does not carry over the source file's explicit ACL. $InstallDir is created
+    # with a plain `New-Item -ItemType Directory` (Step 1), so it inherits from its
+    # parent, which normally grants read to other local principals. A `Copy-Item`
+    # of .env therefore lands POSTGRES_PASSWORD, FSEVEN_APP_DB_PASSWORD,
+    # ADMIN_API_KEY, CREDENTIAL_ENCRYPTION_KEY — and the JWT PEM on a re-run — on
+    # disk readable by other local users for the whole window before Set-Acl runs.
+    # That is the exact write-then-restrict TOCTOU that PB5 names, re-created on
+    # the backup instead of on .env.
+    #
+    # So: create the destination EMPTY, restrict it, and only then stream the bytes
+    # in — the same restrict-before-write order as Write-SecretFile.
+    #
+    # Bytes, never text: this is a rollback copy of the operator's real .env, so it
+    # must be byte-for-byte and must not go through an encoding round-trip
+    # (Get-Content/Set-Content would re-encode it, and on Windows PowerShell 5.1
+    # would mangle any non-ASCII byte an operator had put in the file).
+    if (Test-Path $Destination) { Remove-Item $Destination -Force }
+    New-Item -ItemType File -Path $Destination -Force | Out-Null
+    Protect-FilePath $Destination
+    [System.IO.File]::WriteAllBytes($Destination, [System.IO.File]::ReadAllBytes($Source))
+}
+
 function Add-PersistentJwtKey {
     # PB4: provision CONTROLLER_JWT_PRIVATE_KEY into .env if (and only if) it is
     # absent — an existing key is NEVER rotated, same contract as
@@ -175,42 +203,54 @@ function Add-PersistentJwtKey {
     }
     $timestamp = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
     $backup = "$EnvFile.pb4.bak"
-    Copy-Item -Path $EnvFile -Destination $backup -Force
-    Protect-FilePath $backup
+    # Restricted BEFORE the secrets land in it — see Copy-SecretFile. (`Copy-Item`
+    # here is what re-created PB5 on Windows: it gave the backup the install
+    # directory's inheritable ACL, so every secret in .env was other-user-readable
+    # until the following Set-Acl.)
+    Copy-SecretFile $EnvFile $backup
 
-    # Multi-line double-quoted value: Compose v2's dotenv parser accepts it and
-    # renders it as a YAML block scalar (the installer contract tests render this
-    # exact form through `docker compose config` and diff the round-tripped PEM
-    # against the original, so a parser regression is caught in CI).
-    $block = "`n" +
-             "# Added by install.ps1 on $timestamp — persistent Ed25519 JWT signing`n" +
-             "# key (Audit Run 37, PB4). Keep this value: rotating it invalidates every`n" +
-             "# outstanding agent bearer token and forces each agent to re-authenticate.`n" +
-             "CONTROLLER_JWT_PRIVATE_KEY=`"$pem`n`"`n"
-    Add-SecretLines $EnvFile $block
+    try {
+        # Multi-line double-quoted value: Compose v2's dotenv parser accepts it and
+        # renders it as a YAML block scalar (the installer contract tests render this
+        # exact form through `docker compose config` and diff the round-tripped PEM
+        # against the original, so a parser regression is caught in CI).
+        $block = "`n" +
+                 "# Added by install.ps1 on $timestamp — persistent Ed25519 JWT signing`n" +
+                 "# key (Audit Run 37, PB4). Keep this value: rotating it invalidates every`n" +
+                 "# outstanding agent bearer token and forces each agent to re-authenticate.`n" +
+                 "CONTROLLER_JWT_PRIVATE_KEY=`"$pem`n`"`n"
+        Add-SecretLines $EnvFile $block
 
-    if (-not $VerifyRender) {
-        Remove-Item $backup -ErrorAction SilentlyContinue
-        return
-    }
+        if (-not $VerifyRender) { return }
 
-    # Verify the PEM actually renders through THIS machine's compose build before
-    # committing to it; restore the previous .env if it does not, so a compose
-    # parser gap degrades to the old behaviour instead of breaking the install.
-    $rendered = $null
-    try { $rendered = (docker compose --profile community config 2>$null | Out-String) } catch { $rendered = $null }
-    if ($rendered -and $rendered -match 'BEGIN PRIVATE KEY') {
-        Remove-Item $backup -ErrorAction SilentlyContinue
-        Write-Step "Provisioned a persistent JWT signing key (agent tokens now survive controller restarts)"
-    } else {
-        Move-Item -Path $backup -Destination $EnvFile -Force
-        Protect-FilePath $EnvFile
-        Write-Warn2 @'
+        # Verify the PEM actually renders through THIS machine's compose build before
+        # committing to it; restore the previous .env if it does not, so a compose
+        # parser gap degrades to the old behaviour instead of breaking the install.
+        $rendered = $null
+        try { $rendered = (docker compose --profile community config 2>$null | Out-String) } catch { $rendered = $null }
+        if ($rendered -and $rendered -match 'BEGIN PRIVATE KEY') {
+            Write-Step "Provisioned a persistent JWT signing key (agent tokens now survive controller restarts)"
+        } else {
+            # Restore. Move-Item is a rename within the directory, so .env keeps the
+            # backup's explicit (already-restricted) ACL rather than picking the
+            # directory's inheritable one back up; Protect-FilePath re-asserts anyway.
+            Move-Item -Path $backup -Destination $EnvFile -Force
+            Protect-FilePath $EnvFile
+            Write-Warn2 @'
 This docker compose build could not render a multi-line PEM from .env —
 leaving CONTROLLER_JWT_PRIVATE_KEY unset. The controller will generate its own
 signing key; on controller images <= v0.2.2 that key is ephemeral, so agent
 bearer tokens are invalidated on every restart (PB4).
 '@
+        }
+    } finally {
+        # PB5: .env.pb4.bak is a FULL PLAINTEXT COPY of every secret in .env. If the
+        # installer throws (or is Ctrl-C'd) anywhere in the window above, that copy
+        # would otherwise be left on disk permanently — long after the installer that
+        # understood it was temporary has gone. Clear it on EVERY exit from this
+        # function, including the early `return` and the error path. The rollback
+        # branch moves it onto .env first, so this is a no-op once it has done its job.
+        if (Test-Path $backup) { Remove-Item $backup -Force -ErrorAction SilentlyContinue }
     }
 }
 

@@ -16,10 +16,13 @@ name: static-checks
 #   * the install.sh AND install.ps1 behaviour scenarios (PB3 scrub guidance on
 #     every branch, PB5 restricted-before-write .env).
 #
-# FSEVEN_REQUIRE_DOCKER / FSEVEN_REQUIRE_PWSH make the gate FAIL rather than
-# skip if either tool is missing from the runner. A check that silently skips is
-# not a check — that is precisely how PB4 stayed open on Windows for three audit
-# runs while CI was green.
+# FSEVEN_REQUIRE_DOCKER / FSEVEN_REQUIRE_PWSH / FSEVEN_REQUIRE_TOOLS make the gate
+# FAIL rather than skip if docker, pwsh, python3 or openssl is missing from the
+# runner. A check that silently skips is not a check — that is precisely how PB4
+# stayed open on Windows for three audit runs while CI was green. FSEVEN_REQUIRE_TOOLS
+# closes the last of those: several PB4 assertions (the rendered-PEM round-trips and
+# the Ed25519 key-validity checks) used to no-op with no guard at all whenever
+# python3/openssl were absent.
 
 on:
   pull_request:
@@ -36,6 +39,7 @@ jobs:
     env:
       FSEVEN_REQUIRE_DOCKER: '1'
       FSEVEN_REQUIRE_PWSH: '1'
+      FSEVEN_REQUIRE_TOOLS: '1'
     steps:
       - uses: actions/checkout@v4
 

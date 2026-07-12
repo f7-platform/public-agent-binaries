@@ -25,6 +25,50 @@ assert_not_contains() {
   fi
 }
 
+# ── Fail-closed tool guard ───────────────────────────────────────────────────
+# A check that silently skips is not a check. Several PB4 assertions used to
+# no-op whenever python3/openssl were absent, with no guard of any kind — the
+# same shape that let PB4 stay open on Windows for three audit runs while CI was
+# green. FSEVEN_REQUIRE_TOOLS=1 (set by CI, alongside FSEVEN_REQUIRE_DOCKER and
+# FSEVEN_REQUIRE_PWSH) turns every one of those skips into a hard failure, so the
+# runner can never quietly stop checking.
+#
+# Returns 0 when every tool is present; returns 1 when one is missing and the
+# guard is OFF (local dev convenience); EXITS non-zero when one is missing and
+# the guard is ON.
+require_tools() {
+  local what="$1"; shift
+  local missing="" tool
+  for tool in "$@"; do
+    if ! command -v "$tool" >/dev/null 2>&1; then
+      missing="$missing $tool"
+    fi
+  done
+  if [[ -z "$missing" ]]; then
+    return 0
+  fi
+  if [[ "${FSEVEN_REQUIRE_TOOLS:-0}" == "1" ]]; then
+    printf '%s REQUIRES%s (FSEVEN_REQUIRE_TOOLS=1) but it is not available\n' "$what" "$missing" >&2
+    exit 1
+  fi
+  printf '%s:%s unavailable; SKIPPED\n' "$what" "$missing"
+  return 1
+}
+
+require_real_docker() {
+  # Same contract as require_tools, for the captured $REAL_DOCKER path.
+  local what="$1"
+  if [[ -n "${REAL_DOCKER:-}" ]]; then
+    return 0
+  fi
+  if [[ "${FSEVEN_REQUIRE_DOCKER:-0}" == "1" ]]; then
+    printf '%s REQUIRES docker (FSEVEN_REQUIRE_DOCKER=1) but it is not available\n' "$what" >&2
+    exit 1
+  fi
+  printf '%s: docker unavailable; SKIPPED\n' "$what"
+  return 1
+}
+
 assert_contains \
   "$ROOT_DIR/install.sh" \
   'SECRETS_PATH="/app/model-storage/bootstrap/secrets.env"' \
@@ -593,7 +637,7 @@ if command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; 
   # key we started with (and still parseable as an Ed25519 key). Note the .env
   # is the ONLY source of the value — it is deliberately NOT exported into the
   # process environment, because that would bypass the dotenv parser under test.
-  if command -v openssl >/dev/null 2>&1 && command -v python3 >/dev/null 2>&1; then
+  if require_tools 'PB4 rendered-PEM round-trip' openssl python3; then
     pem_dir="$(mktemp -d)"
     trap 'rm -f "$rendered_compose" "$rendered_prod_compose"; rm -rf "$pem_dir"' EXIT
     cp "$ROOT_DIR/docker-compose.yml" "$pem_dir/docker-compose.yml"
@@ -659,8 +703,6 @@ PY
       exit 1
     fi
     printf 'PB4: multi-line Ed25519 PEM survives Compose dotenv -> container env intact (verified)\n'
-  else
-    printf 'PB4: openssl/python3 unavailable; skipped rendered PEM round-trip\n'
   fi
 elif [[ "${FSEVEN_REQUIRE_DOCKER:-0}" == "1" ]]; then
   # PB6 class of failure: a check that silently skips is not a check. CI sets
@@ -684,6 +726,29 @@ fi
 file_mode() {
   # 0644-style mode, portable across GNU coreutils and BSD/macOS stat.
   if stat -c '%a' "$1" >/dev/null 2>&1; then stat -c '%a' "$1"; else stat -f '%Lp' "$1"; fi
+}
+
+first_pem_body_line() {
+  # The first base64 line of the PEM inside CONTROLLER_JWT_PRIVATE_KEY: a stable
+  # fingerprint of the provisioned key that needs neither python3 nor openssl.
+  # The "did the re-run rotate the key?" assertions used to read this out of a
+  # .pem file that was only produced when openssl AND python3 were both present —
+  # so on a runner missing either, the no-rotation check compared against an
+  # empty string and could not fail.
+  sed -n '/^CONTROLLER_JWT_PRIVATE_KEY="-----BEGIN PRIVATE KEY-----$/{n;p;q;}' "$1"
+}
+
+assert_no_backup_left() {
+  # PB5: `.env.pb4.bak` is a byte-for-byte copy of .env — POSTGRES_PASSWORD,
+  # FSEVEN_APP_DB_PASSWORD, ADMIN_API_KEY, CREDENTIAL_ENCRYPTION_KEY, and the JWT
+  # PEM on a re-run. It exists only as a rollback for the compose-render check and
+  # MUST NOT survive the installer, or every secret sits in a second file that no
+  # operator knows to delete.
+  local dir="$1" label="$2"
+  if [[ -e "$dir/.env.pb4.bak" ]]; then
+    printf 'PB5 [%s]: left .env.pb4.bak behind — a full plaintext copy of every secret in .env\n' "$label" >&2
+    exit 1
+  fi
 }
 
 make_docker_stub() {
@@ -757,9 +822,11 @@ assert_env_pem_renders() {
   # test serialized itself: the thing that must not break is the exact byte
   # sequence the installer writes, passed through the exact parser Compose uses.
   local dir="$1" label="$2"
-  [[ -n "$REAL_DOCKER" ]] || return 0
-  command -v python3 >/dev/null 2>&1 || return 0
-  command -v openssl >/dev/null 2>&1 || return 0
+  # Fail closed on CI (FSEVEN_REQUIRE_DOCKER / FSEVEN_REQUIRE_TOOLS): these used to
+  # be three bare `|| return 0`s, so on a runner that lost python3 or openssl this
+  # entire assertion would evaporate and the gate would still go green.
+  require_real_docker "PB4 [$label] installer-written PEM round-trip" || return 0
+  require_tools "PB4 [$label] installer-written PEM round-trip" python3 openssl || return 0
 
   ( cd "$dir" && unset CONTROLLER_JWT_PRIVATE_KEY \
       && "$REAL_DOCKER" compose --profile community config --format json > rendered.json 2>/dev/null )
@@ -802,10 +869,61 @@ PY
   printf 'PB4: the key %s wrote survives Compose dotenv -> container env intact (verified)\n' "$label"
 }
 
+make_chmod_stub() {
+  # A `chmod` interceptor, used to prove ORDER OF OPERATIONS rather than final
+  # state. Both installers restrict files by shelling out to chmod on this
+  # platform (install.sh directly; install.ps1 via Protect-FilePath's non-Windows
+  # branch — the exact call site the Windows Set-Acl branch replaces), so it sees
+  # every restriction as it happens.
+  #
+  #   * records "<path>|<size>" — the file's size AT THE MOMENT it is restricted,
+  #     which is what says whether secret bytes were already on disk at the
+  #     permissive inherited mode/ACL;
+  #   * FSEVEN_TEST_CHMOD_FAIL=<suffix> makes the matching chmod FAIL, which under
+  #     `set -e` kills install.sh mid-flight — used to prove the secret-copy
+  #     cleanup survives a crash.
+  #
+  # It delegates to the real chmod, so it is transparent to any scenario that does
+  # not set FSEVEN_CHMOD_TRACE.
+  local stub="$1/chmod"
+  local real_chmod
+  real_chmod="$(command -v chmod)"
+  cat > "$stub" <<TRACE_STUB
+#!/usr/bin/env bash
+set -u
+if [[ -n "\${FSEVEN_CHMOD_TRACE:-}" ]]; then
+  for arg in "\$@"; do
+    case "\$arg" in
+      /*) ;;
+      *) continue ;;
+    esac
+    [[ -f "\$arg" ]] || continue
+    if size=\$(stat -c '%s' "\$arg" 2>/dev/null); then :; else size=\$(stat -f '%z' "\$arg"); fi
+    printf '%s|%s\n' "\$arg" "\$size" >> "\$FSEVEN_CHMOD_TRACE"
+    if [[ -n "\${FSEVEN_TEST_CHMOD_FAIL:-}" && "\$arg" == *"\$FSEVEN_TEST_CHMOD_FAIL" ]]; then
+      # Fail on the Nth chmod of this path (the trace line was just appended, so
+      # the occurrence count IS the call index). Lets a scenario pick the chmod
+      # that sits INSIDE a specific window rather than the first one.
+      n=\$(grep -c -F "\$arg|" "\$FSEVEN_CHMOD_TRACE" 2>/dev/null || true)
+      if [[ "\${n:-0}" -ge "\${FSEVEN_TEST_CHMOD_FAIL_NTH:-1}" ]]; then
+        printf 'chmod: injected failure on %s (call %s)\n' "\$arg" "\$n" >&2
+        exit 1
+      fi
+    fi
+  done
+fi
+exec "$real_chmod" "\$@"
+TRACE_STUB
+  "$real_chmod" +x "$stub"
+}
+
 scenario_root="$(mktemp -d)"
 stub_bin="$scenario_root/bin"
 mkdir -p "$stub_bin"
 make_docker_stub "$stub_bin"
+trace_bin="$scenario_root/trace-bin"
+mkdir -p "$trace_bin"
+make_chmod_stub "$trace_bin"
 REAL_DOCKER="$(command -v docker || true)"
 
 COMPOSE_SHA256="$(
@@ -865,13 +983,22 @@ if [[ "$sh_compose_mode" != "600" ]]; then
 fi
 printf 'PB5: install.sh creates .env + compose 0600 under a hostile umask 000 (verified)\n'
 
+# PB5: no leftover secret copy. .env.pb4.bak is a FULL copy of every secret in
+# .env; the installer must never leave one behind on any exit path.
+assert_no_backup_left "$sh_fresh" 'install.sh (happy path)'
+
 # PB4, behaviorally: a persistent key was provisioned into .env, in the
 # multi-line form, and it is a real Ed25519 key.
 if ! grep -q '^CONTROLLER_JWT_PRIVATE_KEY="-----BEGIN PRIVATE KEY-----$' "$sh_fresh/.env"; then
   printf 'PB4: install.sh did not provision a multi-line CONTROLLER_JWT_PRIVATE_KEY into .env\n' >&2
   exit 1
 fi
-if command -v openssl >/dev/null 2>&1 && command -v python3 >/dev/null 2>&1; then
+sh_key_fingerprint="$(first_pem_body_line "$sh_fresh/.env")"
+if [[ -z "$sh_key_fingerprint" ]]; then
+  printf 'PB4: could not read back the key install.sh wrote into .env\n' >&2
+  exit 1
+fi
+if require_tools 'PB4 install.sh key validity' openssl python3; then
   python3 - "$sh_fresh/.env" > "$scenario_root/sh-key.pem" <<'PY'
 import re, sys
 text = open(sys.argv[1]).read()
@@ -915,13 +1042,66 @@ assert_output_contains "$sh_out3" 'docker compose exec controller rm -f /app/mod
   'PB3: install.sh scrub guidance on the RE-RUN branch'
 
 # The re-run must NOT rotate the persistent key (rotating it invalidates every
-# outstanding agent bearer token).
-if ! grep -Fqx -- "$(sed -n '2p' "$scenario_root/sh-key.pem")" "$sh_fresh/.env"; then
+# outstanding agent bearer token). Compared against a fingerprint taken with
+# sed — NOT against a .pem file that only exists when openssl+python3 do, which
+# is what this assertion used to depend on.
+if ! grep -Fqx -- "$sh_key_fingerprint" "$sh_fresh/.env"; then
   printf 'PB4: install.sh ROTATED CONTROLLER_JWT_PRIVATE_KEY on re-run (must be preserved)\n' >&2
   exit 1
 fi
+assert_no_backup_left "$sh_fresh" 'install.sh (re-run)'
 printf 'PB3: install.sh emits scrub guidance on all three branches (verified)\n'
 printf 'PB4: install.sh preserves the existing JWT key on re-run (verified)\n'
+
+# ── Scenario 4: the installer DIES inside the backup window ─────────────────
+# .env.pb4.bak is a byte-for-byte copy of .env: POSTGRES_PASSWORD,
+# FSEVEN_APP_DB_PASSWORD, ADMIN_API_KEY, CREDENTIAL_ENCRYPTION_KEY. It exists only
+# as a rollback for the compose-render check, and the happy/rollback paths both
+# remove it — but neither installer had any cleanup on the ERROR path, so an
+# installer that died in that window (failing command under `set -e`, Ctrl-C,
+# closed terminal) left every secret sitting in a second file, permanently, that
+# no operator knows to delete.
+#
+# Kill it there for real: fault-inject a failure into the SECOND chmod of .env,
+# which install.sh performs after the `cp` and before the `rm`/`mv` (install.sh
+# :396). The exit must be non-zero AND no .env.pb4.bak may survive.
+sh_crash="$scenario_root/sh-crash"
+sh_out4="$scenario_root/sh-out-4.txt"
+crash_trace="$scenario_root/sh-crash-trace.txt"
+: > "$crash_trace"
+set +e
+(
+  umask 000
+  PATH="$trace_bin:$stub_bin:$PATH" \
+  FSEVEN_REAL_DOCKER="$REAL_DOCKER" \
+  FSEVEN_CHMOD_TRACE="$crash_trace" \
+  FSEVEN_TEST_CHMOD_FAIL='/.env' \
+  FSEVEN_TEST_CHMOD_FAIL_NTH=2 \
+  FSEVEN_TEST_BOOTSTRAP_READY=no \
+  FSEVEN_TEST_HEALTHCHECK=no \
+  FSEVEN_BOOTSTRAP_TIMEOUT_SECS=2 \
+  FSEVEN_RELEASE_MANIFEST_URL="file:///nonexistent-fseven-release-manifest.json" \
+  FSEVEN_COMPOSE_URL="file://$ROOT_DIR/docker-compose.yml" \
+  FSEVEN_COMPOSE_SHA256="$COMPOSE_SHA256" \
+    bash "$ROOT_DIR/install.sh" --dir "$sh_crash" --no-agent
+) > "$sh_out4" 2>&1
+sh_crash_rc=$?
+set -e
+
+# The injection must actually have killed it inside the window, or this proves
+# nothing: require a non-zero exit AND evidence the backup had been taken.
+if [[ "$sh_crash_rc" -eq 0 ]]; then
+  printf 'PB5: the crash injection did not kill install.sh (rc=0) — the no-leftover proof below would be vacuous\n' >&2
+  cat "$sh_out4" >&2
+  exit 1
+fi
+if ! grep -Fq 'injected failure' "$sh_out4"; then
+  printf 'PB5: install.sh died before the injected chmod, not inside the backup window — proof would be vacuous\n' >&2
+  cat "$sh_out4" >&2
+  exit 1
+fi
+assert_no_backup_left "$sh_crash" 'install.sh (killed inside the backup window)'
+printf 'PB5: install.sh leaves no .env.pb4.bak secret copy behind when it dies mid-window (verified)\n'
 
 # ── install.ps1 scenarios (Windows parity) ──────────────────────────────────
 # install.ps1 is the file the Run-34/36 PB3+PB4+PB5 work never touched. Windows
@@ -959,18 +1139,29 @@ if command -v pwsh >/dev/null 2>&1; then
   assert_output_contains "$ps_out1" 'docker compose exec controller rm -f /app/model-storage/bootstrap/secrets.env' \
     'PB3: install.ps1 scrub guidance on the bootstrap-ready branch'
 
+  # NOTE: this is a FINAL-mode check and it cannot, on its own, prove PB5 — see the
+  # creation-time trace scenario below. Write-SecretFile re-asserts the restriction
+  # AFTER writing, so a write-then-restrict regression still ends at 600 and would
+  # still print "(verified)" here.
   ps_env_mode="$(file_mode "$ps_fresh/.env")"
   if [[ "$ps_env_mode" != "600" ]]; then
     printf 'PB5: install.ps1 .env is mode %s under umask 000 (expected 600)\n' "$ps_env_mode" >&2
     exit 1
   fi
-  printf 'PB5: install.ps1 creates .env restricted-before-write under a hostile umask 000 (verified)\n'
+  printf 'PB5: install.ps1 .env ends at 0600 under a hostile umask 000 (final mode; ordering proven below)\n'
+
+  assert_no_backup_left "$ps_fresh" 'install.ps1 (happy path)'
 
   if ! grep -q '^CONTROLLER_JWT_PRIVATE_KEY="-----BEGIN PRIVATE KEY-----$' "$ps_fresh/.env"; then
     printf 'PB4: install.ps1 did not provision a multi-line CONTROLLER_JWT_PRIVATE_KEY into .env (Windows still boots on an ephemeral key)\n' >&2
     exit 1
   fi
-  if command -v openssl >/dev/null 2>&1 && command -v python3 >/dev/null 2>&1; then
+  ps_key_fingerprint="$(first_pem_body_line "$ps_fresh/.env")"
+  if [[ -z "$ps_key_fingerprint" ]]; then
+    printf 'PB4: could not read back the key install.ps1 wrote into .env\n' >&2
+    exit 1
+  fi
+  if require_tools 'PB4 install.ps1 key validity' openssl python3; then
     python3 - "$ps_fresh/.env" > "$scenario_root/ps-key.pem" <<'PY'
 import re, sys
 text = open(sys.argv[1]).read()
@@ -1008,11 +1199,83 @@ PY
     'install.ps1: reached the re-run branch'
   assert_output_contains "$ps_out3" 'docker compose exec controller rm -f /app/model-storage/bootstrap/secrets.env' \
     'PB3: install.ps1 scrub guidance on the RE-RUN branch'
-  if ! grep -Fqx -- "$(sed -n '2p' "$scenario_root/ps-key.pem")" "$ps_fresh/.env"; then
+  if ! grep -Fqx -- "$ps_key_fingerprint" "$ps_fresh/.env"; then
     printf 'PB4: install.ps1 ROTATED CONTROLLER_JWT_PRIVATE_KEY on re-run (must be preserved)\n' >&2
     exit 1
   fi
+  assert_no_backup_left "$ps_fresh" 'install.ps1 (re-run)'
   printf 'PB3: install.ps1 emits scrub guidance on all three branches (verified)\n'
+
+  # ── PB5 (install.ps1): CREATION-TIME proof, not final-mode ─────────────────
+  # Everything above is final-state. Final state CANNOT distinguish "restricted
+  # before any secret byte was written" from "written at the inherited
+  # ACL/umask, then restricted" — both end at 0600, because Write-SecretFile
+  # re-asserts the restriction after writing. That blind spot is exactly how the
+  # PB5 fix shipped with PB5 re-created inside it: the `.env.pb4.bak` backup was
+  # taken with `Copy-Item` (which on Windows gives the NEW file the containing
+  # directory's INHERITABLE ACL, not the source file's explicit one) and only
+  # restricted afterwards — so a full copy of POSTGRES_PASSWORD,
+  # FSEVEN_APP_DB_PASSWORD, ADMIN_API_KEY and CREDENTIAL_ENCRYPTION_KEY was
+  # other-user-readable on every fresh Windows install, while this gate stayed
+  # green.
+  #
+  # install.sh gets its creation-time proof from the fetched compose file (never
+  # chmod'ed => 0600 only if `umask 077` was in force when it was CREATED).
+  # PowerShell has no umask: its guarantee is per-file ORDERING, so it has to be
+  # proven AS ordering. Protect-FilePath shells out to `chmod` on this platform
+  # (the exact call site the Windows Set-Acl branch replaces), so intercept it and
+  # record each file's SIZE at the moment it is restricted. The invariant:
+  #
+  #     the FIRST restriction of a secret file must happen while it is EMPTY.
+  #
+  # A non-zero size on a path's first chmod means secret bytes were already on
+  # disk, at the permissive inherited mode/ACL, when the restriction was applied.
+  # That is PB5 — whatever the final mode says.
+  assert_restricted_while_empty() {
+    local trace="$1" path="$2" label="$3" first
+    first="$(awk -F'|' -v p="$path" '$1 == p { print $2; exit }' "$trace")"
+    if [[ -z "$first" ]]; then
+      printf 'PB5: install.ps1 NEVER restricted %s (%s) — it keeps the install directory'"'"'s inherited ACL/mode\n' "$path" "$label" >&2
+      exit 1
+    fi
+    if [[ "$first" != "0" ]]; then
+      printf 'PB5: install.ps1 restricted %s (%s) only AFTER %s bytes of secrets were already in it.\n' "$path" "$label" "$first" >&2
+      printf '     The file existed with secrets in it at the inherited directory ACL (Windows) / ambient umask (POSIX)\n' >&2
+      printf '     for the window before the restriction landed. That is the write-then-restrict TOCTOU PB5 names.\n' >&2
+      printf '     Create the file EMPTY, restrict it, and only THEN write the secrets (see Write-SecretFile / Copy-SecretFile).\n' >&2
+      exit 1
+    fi
+    printf 'PB5: install.ps1 restricted %s while EMPTY, before any secret byte (verified)\n' "$label"
+  }
+
+  # -ProvisionEnvOnly runs the real .env writer AND the real backup path, with no
+  # Docker and no network — so this exercises both secret files the installer
+  # creates.
+  ps_order="$scenario_root/ps-order"
+  ps_trace="$scenario_root/ps-chmod-trace.txt"
+  : > "$ps_trace"
+  (
+    umask 000
+    PATH="$trace_bin:$PATH" \
+    FSEVEN_CHMOD_TRACE="$ps_trace" \
+      pwsh -NoProfile -File "$ROOT_DIR/install.ps1" -InstallDir "$ps_order" -ProvisionEnvOnly
+  ) > "$scenario_root/ps-out-order.txt" 2>&1
+
+  # Vacuity guard: if the interception never fired, every assertion below would
+  # pass trivially on an empty trace.
+  if [[ ! -s "$ps_trace" ]]; then
+    printf 'PB5: captured NO chmod trace from install.ps1 — the Protect-FilePath interception did not fire, so this proof would be vacuous\n' >&2
+    cat "$scenario_root/ps-out-order.txt" >&2
+    exit 1
+  fi
+  if ! grep -Fq "$ps_order/.env.pb4.bak" "$ps_trace"; then
+    printf 'PB5: install.ps1 never restricted .env.pb4.bak at all — the backup keeps the install directory'"'"'s inherited ACL (every secret in .env, readable by other local users)\n' >&2
+    exit 1
+  fi
+
+  assert_restricted_while_empty "$ps_trace" "$ps_order/.env" '.env'
+  assert_restricted_while_empty "$ps_trace" "$ps_order/.env.pb4.bak" '.env.pb4.bak (a full copy of every secret in .env)'
+  assert_no_backup_left "$ps_order" 'install.ps1 (-ProvisionEnvOnly)'
 elif [[ "${FSEVEN_REQUIRE_PWSH:-0}" == "1" ]]; then
   # As with docker: CI sets FSEVEN_REQUIRE_PWSH=1 so the Windows-parity half can
   # never silently no-op. A skipped check is how install.ps1 drifted a whole
