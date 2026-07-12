@@ -280,6 +280,67 @@ assert_contains \
   'OPENFGA_PLAYGROUND_ENABLED: "${OPENFGA_PLAYGROUND_ENABLED:-false}"' \
   'PB6: gate covers post-CD10 OpenFGA-playground parity (defaulted-false)'
 
+# PB4 (Run 34/35/36/37, LOW, chronic): install.sh must provision a PERSISTENT
+# Ed25519 JWT signing key into .env. Without it the community controller
+# generates its own key, and on the published image (v0.2.2) that key is
+# ephemeral — it logs "generating ephemeral key (tokens won't survive restart)"
+# and every container restart invalidates outstanding agent bearer tokens.
+# The provisioning must (a) only write when the key is absent (never rotate an
+# existing key), (b) verify the multi-line PEM actually renders through
+# `docker compose config` before keeping it, and (c) restore the previous .env
+# if it does not — a compose-parser gap must degrade to the old behaviour, never
+# break the install.
+assert_contains \
+  "$ROOT_DIR/install.sh" \
+  "openssl genpkey -algorithm ed25519" \
+  'PB4: install.sh generates an Ed25519 JWT signing key'
+assert_contains \
+  "$ROOT_DIR/install.sh" \
+  "if ! grep -q '^CONTROLLER_JWT_PRIVATE_KEY=' \"\$ENV_FILE\"; then" \
+  'PB4: JWT key is only provisioned when absent (existing key never rotated)'
+assert_contains \
+  "$ROOT_DIR/install.sh" \
+  'CONTROLLER_JWT_PRIVATE_KEY="%s\n"' \
+  'PB4: PEM written as a multi-line double-quoted .env value'
+assert_contains \
+  "$ROOT_DIR/install.sh" \
+  'docker compose --profile community config 2>/dev/null' \
+  'PB4: provisioned PEM is rendered through docker compose config before it is kept'
+assert_contains \
+  "$ROOT_DIR/install.sh" \
+  "grep -q 'BEGIN PRIVATE KEY'" \
+  'PB4: rendered compose is checked for the PEM (render verification, not blind write)'
+assert_contains \
+  "$ROOT_DIR/install.sh" \
+  'mv "$ENV_FILE.pb4.bak" "$ENV_FILE"' \
+  'PB4: .env is restored if the compose build cannot parse the multi-line PEM'
+assert_contains \
+  "$ROOT_DIR/docker-compose.yml" \
+  'CONTROLLER_JWT_PRIVATE_KEY: "${CONTROLLER_JWT_PRIVATE_KEY:-}"' \
+  'PB4: compose propagates the JWT signing key to the controller'
+
+# PB5 (Run 34/37, INFO): the agent enrollment seed carries a single-use 1h-TTL
+# token. The file must be CREATED mode-0600 before the token is written to it —
+# a create-at-umask-then-chmod sequence leaves the token world-readable for the
+# window in between.
+assert_contains \
+  "$ROOT_DIR/install.sh" \
+  'sudo install -m 0600 /dev/null /etc/fseven/enrollment-seed.toml' \
+  'PB5: enrollment seed file is created 0600 before the token is written'
+assert_contains \
+  "$ROOT_DIR/install.sh" \
+  'sudo chmod 0600 /etc/fseven/enrollment-seed.toml' \
+  'PB5: enrollment seed file permissions are enforced after the write'
+
+# PB3 (Run 34/37, LOW): the controller writes the one-time bootstrap password in
+# cleartext to the model-storage volume. The installer cannot stop that write
+# (it is controller-side), but it MUST tell the operator to scrub the file after
+# the first login instead of leaving it at rest indefinitely.
+assert_contains \
+  "$ROOT_DIR/install.sh" \
+  'docker compose exec controller rm -f %s' \
+  'PB3: installer tells the operator to delete the cleartext bootstrap secrets file'
+
 assert_contains \
   "$ROOT_DIR/README.md" \
   'curl -fsSLO "$release_base/$asset.sha256"' \

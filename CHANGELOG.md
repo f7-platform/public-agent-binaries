@@ -8,6 +8,51 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 
 ### Security
 
+- **(Audit Run 34/36, INF5/PB9):** the published `docker-compose.yml` no longer
+  hardcodes `OPENFGA_PLAYGROUND_ENABLED: "true"`. The OpenFGA playground is an
+  authorization-model *editing* UI and must never ship enabled; the controller
+  source-of-truth compose had already defaulted it off, but the published mirror
+  retained the hardcoded `true`, so any operator running `--profile prod` (or
+  `--profile dev`) started the model editor enabled — network-reachable if
+  `OPENFGA_BIND` was widened from its `127.0.0.1` default. The mirror now uses
+  the secure-by-default `"${OPENFGA_PLAYGROUND_ENABLED:-false}"` form (explicit
+  opt-in preserved for local dev), and `tests/bootstrap-handoff-static.sh`
+  asserts both the static form and the *rendered* `prod`-profile value so the
+  drift cannot re-enter undetected. This entry closes the CHANGELOG omission
+  tracked as PB11 (Audit Run 37) — the fix shipped without being recorded here.
+- **(Audit Run 34/35/36, PB6):** `tests/bootstrap-handoff-static.sh` gained a
+  consolidated post-CD10 compose-parity completeness block. This static gate is
+  the only automated check that catches compose drift between releases, and its
+  coverage gap is how PB8 (owner-role serving credentials) and PB9 (hardcoded-true
+  playground) both reached the published artifact undetected.
+- **(Audit Run 34/37, PB4):** `install.sh` now provisions a **persistent** Ed25519
+  JWT signing key (`CONTROLLER_JWT_PRIVATE_KEY`) into `.env` (chmod 600) instead
+  of leaving the controller to generate its own. On the published controller
+  image the self-generated key is *ephemeral* — the controller logs
+  `generating ephemeral key (tokens won't survive restart)` — so every
+  `docker compose restart` or host reboot invalidated every outstanding agent
+  bearer token. The historical blocker (a multi-line Ed25519 PEM "cannot be
+  represented in a compose env-file") does not hold: Compose v2's dotenv parser
+  accepts multi-line double-quoted values and renders them as a YAML block
+  scalar. The installer nevertheless **verifies** the key renders through
+  `docker compose config` before keeping it and restores the previous `.env` if
+  it does not, so a compose-parser gap degrades to the previous behaviour rather
+  than breaking the install. An existing `CONTROLLER_JWT_PRIVATE_KEY` is never
+  rotated. Scope note: admin dashboard sessions use an opaque DB-backed
+  `fseven_session` cookie and were never affected by the ephemeral key — the
+  blast radius was agent tokens only (the Run-34 description overstated it).
+- **(Audit Run 34/37, PB5):** the agent enrollment seed
+  (`/etc/fseven/enrollment-seed.toml`, single-use 1h-TTL token) is now *created*
+  mode-0600 (`install -m 0600 /dev/null`) before the token is written into it.
+  The previous create-at-umask-then-`chmod` sequence left the token briefly
+  world-readable between the write and the `chmod`.
+- **(Audit Run 34/37, PB3):** after a successful first login the installer now
+  tells the operator to delete the controller's one-time bootstrap credentials
+  file (`/app/model-storage/bootstrap/secrets.env`), which is written in
+  cleartext into the `model-storage` volume. The write itself is controller-side
+  and remains outside this repository; newer controller builds delete the file
+  automatically on the first admin login, but the currently published image
+  predates that change.
 - **CRITICAL (Audit Run 36, PB8):** synced the CD10 RLS serving-role cutover into
   the published distribution artifacts. The published `docker-compose.yml`
   controller `DATABASE_URL` now connects as the least-privilege `fseven_app` role

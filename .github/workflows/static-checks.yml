@@ -1,0 +1,34 @@
+name: static-checks
+
+# The installer/compose contract gate (tests/bootstrap-handoff-static.sh) is the
+# only automated check that catches drift between the published distribution
+# artifacts and the controller source of truth (PB6, Audit Run 34/35/36) — but
+# nothing ran it: this repo had no pull-request workflow at all, so every
+# assertion in it was advisory. Run it on every PR and on main.
+#
+# GitHub-hosted runners ship Docker, so the rendered-compose half of the gate
+# (fail-closed POSTGRES_PASSWORD / FSEVEN_APP_DB_PASSWORD, prod-profile OpenFGA
+# playground, PB4 PEM rendering) executes here too, not just the static half.
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  bootstrap-handoff-static:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Shell syntax
+        run: |
+          bash -n install.sh
+          bash -n tests/bootstrap-handoff-static.sh
+
+      - name: Installer / compose contract gate
+        run: bash tests/bootstrap-handoff-static.sh
