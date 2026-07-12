@@ -38,9 +38,15 @@
 #   CREDENTIAL_ENCRYPTION_KEY   — required 64-char hex key for encrypting
 #                                 telemetry HMAC keys + integration secrets
 #                                 (install.sh generates one)
-#   CONTROLLER_JWT_PRIVATE_KEY  — optional (controller generates an ephemeral
-#                                 key on boot if unset; community installs leave
-#                                 it unset, so sessions reset on restart — PB4)
+#   CONTROLLER_JWT_PRIVATE_KEY  — optional but strongly recommended: the
+#                                 multi-line Ed25519 PEM that signs agent bearer
+#                                 tokens. install.sh now provisions a persistent
+#                                 one into .env (PB4). If unset the controller
+#                                 generates its own key, and on images ≤ v0.2.2
+#                                 that key is ephemeral — every restart
+#                                 invalidates outstanding agent tokens. (Admin
+#                                 dashboard sessions use a DB-backed cookie and
+#                                 are unaffected either way.)
 #   FSEVEN_LICENSE_PUB_KEY      — optional for community; required for
 #                                 production license signature verification
 #                                 (base64 raw Ed25519 public key)
