@@ -369,20 +369,43 @@ fi
 #
 # Only written when absent: an existing CONTROLLER_JWT_PRIVATE_KEY is never
 # rotated (same contract as POSTGRES_PASSWORD).
+# PB5 (Audit Run 37): .env.pb4.bak is a FULL PLAINTEXT COPY of every secret in
+# .env — POSTGRES_PASSWORD, FSEVEN_APP_DB_PASSWORD, ADMIN_API_KEY,
+# CREDENTIAL_ENCRYPTION_KEY, and the JWT PEM on a re-run. `umask 077` (top of file)
+# means it is CREATED 0600, so unlike the Windows path it is never world-readable —
+# but if this script dies in the window below (any command failing under `set -e`,
+# Ctrl-C, SIGTERM) the copy is left behind on disk permanently, long after the
+# installer that knew it was temporary is gone.
+pb4_backup_clean() { rm -f "$ENV_FILE.pb4.bak"; }
+
+# A signal handler MUST terminate the script itself. Bash runs an INT/TERM/HUP
+# trap and then *RESUMES* at the next command — so `trap 'rm -f …' EXIT INT TERM HUP`
+# (Audit Run 37 / PR #31) deleted the backup and then carried straight on to
+# `docker compose pull` / `up`, SWALLOWING the operator's Ctrl-C. Before that trap
+# existed, Ctrl-C aborted the install (default disposition); after it, the abort was
+# ignored. Restore the abort: clean up, restore the default disposition, and
+# re-raise, so the process really dies by the signal and the parent shell sees
+# death-by-signal rather than success. `exit` is the belt-and-braces fallback for
+# the case where the signal is blocked or ignored (128+signum, the conventional
+# status a shell reports for a signal-killed child).
+pb4_backup_abort() {
+  local sig="$1" status="$2"
+  pb4_backup_clean
+  trap - EXIT "$sig"
+  kill -"$sig" "$$" 2>/dev/null || true
+  exit "$status"
+}
+
 if ! grep -q '^CONTROLLER_JWT_PRIVATE_KEY=' "$ENV_FILE"; then
   if command -v openssl >/dev/null 2>&1; then
     JWT_PEM="$(openssl genpkey -algorithm ed25519 2>/dev/null || true)"
     if [[ "$JWT_PEM" == *"BEGIN PRIVATE KEY"* ]]; then
-      # PB5 (Audit Run 37): .env.pb4.bak is a FULL PLAINTEXT COPY of every secret in
-      # .env — POSTGRES_PASSWORD, FSEVEN_APP_DB_PASSWORD, ADMIN_API_KEY,
-      # CREDENTIAL_ENCRYPTION_KEY, and the JWT PEM on a re-run. `umask 077` (top of
-      # file) means it is CREATED 0600, so unlike the Windows path it is never
-      # world-readable — but if this script dies in the window below (any command
-      # failing under `set -e`, Ctrl-C, SIGTERM) the copy is left behind on disk
-      # permanently, long after the installer that knew it was temporary is gone.
       # Armed BEFORE the cp so even a failing cp is covered; disarmed after the
       # rm/mv below has done its job.
-      trap 'rm -f "$ENV_FILE.pb4.bak"' EXIT INT TERM HUP
+      trap 'pb4_backup_clean' EXIT
+      trap 'pb4_backup_abort INT 130'  INT
+      trap 'pb4_backup_abort TERM 143' TERM
+      trap 'pb4_backup_abort HUP 129'  HUP
       cp "$ENV_FILE" "$ENV_FILE.pb4.bak"
       {
         printf '\n# Added by install.sh on %s — persistent Ed25519 JWT signing\n' \

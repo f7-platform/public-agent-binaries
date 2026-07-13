@@ -142,7 +142,21 @@ function Write-SecretFile([string]$Path, [string]$Content) {
 }
 
 function Add-SecretLines([string]$Path, [string]$Content) {
-    # Append to an already-restricted .env, preserving LF endings.
+    # Append secrets to .env, preserving LF endings.
+    #
+    # PB5: restrict BEFORE the append, not after. This used to be
+    # AppendAllText-then-Protect-FilePath, which was safe only *by assumption* —
+    # "the .env is already restricted". That assumption does not hold on the
+    # UPGRADE path (:372 CREDENTIAL_ENCRYPTION_KEY, :389 FSEVEN_APP_DB_PASSWORD),
+    # which appends to a `.env` written by an OLDER installer — i.e. one created
+    # before the PB5 fix, at the install directory's inherited ACL. Appending a
+    # freshly-minted secret to a world-readable file and tightening it afterwards
+    # is the write-then-restrict TOCTOU PB5 names, re-created on the upgrade path.
+    # Restricting first is correct on every path and costs one Set-Acl/chmod.
+    if (-not (Test-Path $Path)) {
+        New-Item -ItemType File -Path $Path -Force | Out-Null
+    }
+    Protect-FilePath $Path
     $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
     [System.IO.File]::AppendAllText($Path, $Content, $utf8NoBom)
     Protect-FilePath $Path
@@ -203,13 +217,21 @@ function Add-PersistentJwtKey {
     }
     $timestamp = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
     $backup = "$EnvFile.pb4.bak"
-    # Restricted BEFORE the secrets land in it — see Copy-SecretFile. (`Copy-Item`
-    # here is what re-created PB5 on Windows: it gave the backup the install
-    # directory's inheritable ACL, so every secret in .env was other-user-readable
-    # until the following Set-Acl.)
-    Copy-SecretFile $EnvFile $backup
 
+    # The `try` MUST open BEFORE the copy, not after it. Copy-SecretFile creates the
+    # backup file and can throw part-way through (a Set-Acl failure, an IO error mid
+    # WriteAllBytes) — with the copy outside the try, such a throw left a partial or
+    # complete plaintext copy of every secret in .env on disk with no cleanup at all,
+    # which is the leak the `finally` exists to prevent. install.sh deliberately arms
+    # its trap BEFORE the `cp` for exactly this reason (install.sh :383-390); this is
+    # the PowerShell equivalent, and without it the claimed parity did not hold.
     try {
+        # Restricted BEFORE the secrets land in it — see Copy-SecretFile. (`Copy-Item`
+        # here is what re-created PB5 on Windows: it gave the backup the install
+        # directory's inheritable ACL, so every secret in .env was other-user-readable
+        # until the following Set-Acl.)
+        Copy-SecretFile $EnvFile $backup
+
         # Multi-line double-quoted value: Compose v2's dotenv parser accepts it and
         # renders it as a YAML block scalar (the installer contract tests render this
         # exact form through `docker compose config` and diff the round-tripped PEM
