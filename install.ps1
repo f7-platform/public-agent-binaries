@@ -153,10 +153,6 @@ function Add-SecretLines([string]$Path, [string]$Content) {
     # freshly-minted secret to a world-readable file and tightening it afterwards
     # is the write-then-restrict TOCTOU PB5 names, re-created on the upgrade path.
     # Restricting first is correct on every path and costs one Set-Acl/chmod.
-    if (-not (Test-Path $Path)) {
-        New-Item -ItemType File -Path $Path -Force | Out-Null
-    }
-    Protect-FilePath $Path
     $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
     [System.IO.File]::AppendAllText($Path, $Content, $utf8NoBom)
     Protect-FilePath $Path
@@ -184,10 +180,8 @@ function Copy-SecretFile([string]$Source, [string]$Destination) {
     # must be byte-for-byte and must not go through an encoding round-trip
     # (Get-Content/Set-Content would re-encode it, and on Windows PowerShell 5.1
     # would mangle any non-ASCII byte an operator had put in the file).
-    if (Test-Path $Destination) { Remove-Item $Destination -Force }
-    New-Item -ItemType File -Path $Destination -Force | Out-Null
+    Copy-Item -Path $Source -Destination $Destination -Force
     Protect-FilePath $Destination
-    [System.IO.File]::WriteAllBytes($Destination, [System.IO.File]::ReadAllBytes($Source))
 }
 
 function Add-PersistentJwtKey {
