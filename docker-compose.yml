@@ -70,7 +70,14 @@ services:
   # password (install.sh generates one); dev keeps a weak default so
   # `cargo run` works out of the box.
   postgres:
-    image: postgres:16-alpine
+    # INF7 (Audit Run 34..37): pin by immutable digest, not the mutable
+    # `:16-alpine` tag, so a moved upstream tag cannot silently change the
+    # image under a deployment. The trailing tag is retained for human
+    # readability; the digest is what Docker resolves. Bump both together when
+    # intentionally upgrading — and keep the digest identical to the
+    # fseven-controller source-of-truth compose (the parity gate asserts every
+    # third-party image here is digest-pinned).
+    image: postgres:16-alpine@sha256:e013e867e712fec275706a6c51c966f0bb0c93cfa8f51000f85a15f9865a28cb
     container_name: fseven-postgres
     restart: unless-stopped
     environment:
@@ -100,6 +107,12 @@ services:
     # Dockerfile. The controller image is published from the private
     # fseven-controller repo. Set CONTROLLER_IMAGE to pin a specific tag;
     # the default pulls the latest stable release from GHCR.
+    # INF7 note: this first-party image deliberately stays tag-referenced —
+    # a digest pin here would freeze every install to one build and break the
+    # release flow (install.sh pins an exact version via the release manifest).
+    # This matches the fseven-controller source-of-truth compose. All
+    # THIRD-PARTY images in this file are digest-pinned and the parity gate
+    # (tests/bootstrap-handoff-static.sh) enforces that.
     image: ${CONTROLLER_IMAGE:-ghcr.io/f7-platform/public-agent-binaries/controller:latest}
     container_name: fseven-controller
     restart: unless-stopped
@@ -151,7 +164,9 @@ services:
   # nor starts OpenFGA. See §G4 (single-code-path: authorizer interface,
   # not conditional compose).
   openfga:
-    image: openfga/openfga:v1.8
+    # INF7 (Audit Run 34..37): pin by immutable digest, not the mutable `:v1.8`
+    # tag (same digest as the fseven-controller source-of-truth compose).
+    image: openfga/openfga:v1.8@sha256:1e84deddc7c84de8344f3eb0d443c5439666198b68ac37c24fd76fd2e8c1f629
     container_name: fseven-openfga
     restart: unless-stopped
     command: run
@@ -184,7 +199,10 @@ services:
   # Adminer — local-developer convenience only. Never enabled in
   # community or prod profiles.
   adminer:
-    image: adminer:4
+    # INF7 (Audit Run 34..37): pin by immutable digest, not the mutable `:4`
+    # tag. Dev-profile-only convenience image, but pinned for consistency
+    # (same digest as the fseven-controller source-of-truth compose).
+    image: adminer:4@sha256:1068c07446f47f6d52a47387c68341b21b075b6bd651e4bb85d7fc14bca9c33a
     container_name: fseven-adminer
     restart: unless-stopped
     profiles: [dev]

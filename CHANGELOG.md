@@ -8,6 +8,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 
 ### Security
 
+- **(Audit Run 37, INF7 — mutable image tags in the published compose):** the
+  fseven-controller source-of-truth compose pinned its third-party images by
+  immutable digest back in Run 35 (`a1f8b99`), but the `release.yml` compose
+  sync has been dormant since 2026-04-24, so this published mirror kept
+  shipping mutable `postgres:16-alpine` / `openfga/openfga:v1.8` / `adminer:4`
+  tags for three audit runs — a moved upstream tag could silently change the
+  image under every community install. The digest pins are now backported
+  verbatim from the source of truth. Image-digest pinning was also the parity
+  gate's one known blind spot (run-37 pass-2-silo-13 §12): the gate now asserts
+  the three exact digests **and** structurally fails any `image:` line without
+  an `@sha256` digest (the first-party `${CONTROLLER_IMAGE:-…}` reference is the
+  single documented exemption — install.sh pins exact versions via the release
+  manifest), so a future compose re-sync cannot reintroduce an unpinned image
+  (`tests/bootstrap-handoff-static.sh`).
 - **(Audit Run 37, PB5 — the `.env.pb4.bak` secret copy):** *this entry is the record
   of a security fix that shipped without one.* To provision the PB4 JWT key, both
   installers take a rollback copy of `.env` — `.env.pb4.bak`, a **full plaintext copy
