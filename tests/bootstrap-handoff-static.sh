@@ -324,6 +324,48 @@ assert_contains \
   'OPENFGA_PLAYGROUND_ENABLED: "${OPENFGA_PLAYGROUND_ENABLED:-false}"' \
   'PB6: gate covers post-CD10 OpenFGA-playground parity (defaulted-false)'
 
+# INF7 (Run 34..37, MEDIUM): every third-party image in the published compose
+# must be pinned by immutable digest, in parity with the fseven-controller
+# source-of-truth compose (pinned there by a1f8b99, Run 35). The release.yml
+# compose sync has been dormant since 2026-04-24, so the pins never propagated
+# and this published mirror kept mutable tags for three audit runs — and
+# image-digest pinning was this gate's ONE known parity blind spot (run-37
+# pass-2-silo-13 §12). Assert the exact source-of-truth digests, then assert
+# structurally that NO third-party image line can ever ship unpinned again.
+assert_contains \
+  "$ROOT_DIR/docker-compose.yml" \
+  'image: postgres:16-alpine@sha256:e013e867e712fec275706a6c51c966f0bb0c93cfa8f51000f85a15f9865a28cb' \
+  'INF7: postgres image digest-pinned (controller source-of-truth parity)'
+assert_contains \
+  "$ROOT_DIR/docker-compose.yml" \
+  'image: openfga/openfga:v1.8@sha256:1e84deddc7c84de8344f3eb0d443c5439666198b68ac37c24fd76fd2e8c1f629' \
+  'INF7: openfga image digest-pinned (controller source-of-truth parity)'
+assert_contains \
+  "$ROOT_DIR/docker-compose.yml" \
+  'image: adminer:4@sha256:1068c07446f47f6d52a47387c68341b21b075b6bd651e4bb85d7fc14bca9c33a' \
+  'INF7: adminer image digest-pinned (controller source-of-truth parity)'
+# Structural guard: scan every `image:` line in the compose. The ONLY line
+# allowed without an @sha256 digest is the first-party controller image
+# (`${CONTROLLER_IMAGE:-...}`): a digest pin there would freeze every install
+# to one build — install.sh pins exact versions via the release manifest
+# instead, matching the source-of-truth compose. Any other undigested image —
+# including a future service added by a compose re-sync — fails the gate.
+inf7_unpinned="$(grep -nE '^[[:space:]]*image:' "$ROOT_DIR/docker-compose.yml" \
+  | grep -v '@sha256:' \
+  | grep -vF 'image: ${CONTROLLER_IMAGE:-' || true)"
+if [[ -n "$inf7_unpinned" ]]; then
+  printf 'INF7: third-party compose image(s) missing an @sha256 digest pin:\n%s\n' "$inf7_unpinned" >&2
+  exit 1
+fi
+# Non-vacuity: the structural scan must actually be seeing the image lines
+# (4 expected: postgres, controller, openfga, adminer). If the count drops the
+# grep is pointed at the wrong file or the compose was gutted.
+inf7_image_count="$(grep -cE '^[[:space:]]*image:' "$ROOT_DIR/docker-compose.yml")"
+if [[ "$inf7_image_count" -lt 4 ]]; then
+  printf 'INF7: expected >=4 image: lines in docker-compose.yml, found %s — scan is vacuous\n' "$inf7_image_count" >&2
+  exit 1
+fi
+
 # PB4 (Run 34/35/36/37, LOW, chronic): install.sh must provision a PERSISTENT
 # Ed25519 JWT signing key into .env. Without it the community controller
 # generates its own key, and on the published image (v0.2.2) that key is
