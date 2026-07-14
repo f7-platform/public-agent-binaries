@@ -35,7 +35,7 @@ jobs:
       AUDIT_VERIFIER_ALLOWLIST: ${{ vars.AUDIT_VERIFIER_ALLOWLIST }}
     steps:
       - name: Reopen if closed without evidence
-        uses: actions/github-script@v7
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
         with:
           script: |
             const issue = context.payload.issue;
@@ -163,7 +163,7 @@ jobs:
       AUDIT_VERIFIER_ALLOWLIST: ${{ vars.AUDIT_VERIFIER_ALLOWLIST }}
     steps:
       - name: Close on verifier approval
-        uses: actions/github-script@v7
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
         with:
           script: |
             const issue = context.payload.issue;
