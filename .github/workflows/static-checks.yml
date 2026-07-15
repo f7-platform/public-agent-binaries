@@ -34,12 +34,22 @@ on:
     branches: [main]
   push:
     branches: [main]
+  schedule:
+    # #29: the published `:latest` image and this compose can drift apart BETWEEN
+    # releases (the DOA was a compose synced ahead of a stale image, with no PR to
+    # this repo to trip a push/PR check). Re-run the controller-image parity gate
+    # weekly so a stale published image is caught even when nothing here changes.
+    # Only that job runs on this trigger (see the `if:` guards below).
+    - cron: '17 8 * * 1'   # Mondays 08:17 UTC
 
 permissions:
   contents: read
 
 jobs:
   bootstrap-handoff-static:
+    # Static/installer contracts only change with a commit — no value re-running on
+    # the schedule (that trigger exists for the live-image parity job below).
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
     env:
       FSEVEN_REQUIRE_DOCKER: '1'
@@ -74,6 +84,9 @@ jobs:
   # assert on the resulting ACL and on the creation-time ORDER of the restrictions.
   # No Docker and no network needed: -ProvisionEnvOnly is the .env writer end-to-end.
   install-ps1-acl-windows:
+    # Windows ACL logic only changes with install.ps1 — skip the (billed) Windows
+    # runner on the scheduled parity re-run.
+    if: github.event_name != 'schedule'
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -81,3 +94,22 @@ jobs:
       - name: install.ps1 Windows ACL gate (PB5)
         shell: pwsh
         run: ./tests/install-ps1-acl-windows.ps1
+
+  # #29 (Audit Run 37) — Published controller-image parity gate. The env-contract
+  # gate above renders the compose in isolation; it never looks at the IMAGE the
+  # compose points at, which is exactly how the "dead on arrival" community stack
+  # shipped (compose synced to the post-CD10 fseven_app serving role, published
+  # `:latest` stuck at the pre-CD10 v0.2.2 that never provisions that role). This
+  # job reads the published image's org.opencontainers.image.version and fails when
+  # it is older than the compose's declared min_controller_version floor.
+  controller-image-parity:
+    runs-on: ubuntu-latest
+    env:
+      # A gate that silently skips is not a gate (PB6/BF14): make a missing buildx
+      # or an unreadable image a hard failure here, never a green no-op.
+      FSEVEN_REQUIRE_DOCKER: '1'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Published controller image >= compose floor (#29)
+        run: bash tests/controller-image-parity.sh
