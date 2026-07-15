@@ -366,6 +366,24 @@ if [[ "$inf7_image_count" -lt 4 ]]; then
   exit 1
 fi
 
+# #29 (Run 37): INF7 pins the THIRD-PARTY images by digest; the FIRST-PARTY
+# controller image stays tag-referenced (`:latest`) so installs track releases.
+# That leaves the gap #29 named — the compose can depend on a controller capability
+# the published `:latest` predates (the DOA: post-CD10 fseven_app compose vs a stale
+# v0.2.2 image). tests/controller-image-parity.sh enforces the floor against the
+# PUBLISHED image; assert the floor DECLARATION here too, in this network-free gate,
+# so a compose resync that drops the top-level x- key is caught even when the live
+# parity job is not exercised.
+assert_contains \
+  "$ROOT_DIR/docker-compose.yml" \
+  'x-fseven-controller-contract:' \
+  '#29: compose declares the controller-image contract block'
+if ! grep -Eq '^[[:space:]]+min_controller_version:[[:space:]]*v[0-9]+\.[0-9]+\.[0-9]+[[:space:]]*$' \
+     "$ROOT_DIR/docker-compose.yml"; then
+  printf '#29: docker-compose.yml must declare min_controller_version: vX.Y.Z under x-fseven-controller-contract (the parity floor)\n' >&2
+  exit 1
+fi
+
 # PB4 (Run 34/35/36/37, LOW, chronic): install.sh must provision a PERSISTENT
 # Ed25519 JWT signing key into .env. Without it the community controller
 # generates its own key, and on the published image (v0.2.2) that key is

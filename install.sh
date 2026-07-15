@@ -12,8 +12,8 @@
 #      If `.env` exists, reuse every value verbatim — we NEVER
 #      regenerate POSTGRES_PASSWORD on an existing install.
 #   3. `docker compose pull && docker compose --profile community up -d`
-#   4. Wait for first-run bootstrap credentials when present, then wait
-#      for /health/ready before reporting a usable controller.
+#   4. Tail the controller logs until we see the bootstrap banner or
+#      30 s elapses, whichever comes first.
 #   5. Print the dashboard URL and first-run setup URL.
 #
 # Flags:
@@ -29,6 +29,21 @@
 #   --help           Show this message.
 # ─────────────────────────────────────────────────────────────────────
 set -euo pipefail
+
+# ── PB5 (Audit Run 34/37): restrict the creation mode of every file ──
+# This script writes POSTGRES_PASSWORD, FSEVEN_APP_DB_PASSWORD, ADMIN_API_KEY,
+# CREDENTIAL_ENCRYPTION_KEY and the CONTROLLER_JWT_PRIVATE_KEY PEM into `.env`.
+# Previously `.env` was created with `cat >` at the AMBIENT umask (typically 022
+# => 0644) and only chmod'ed to 0600 afterwards, so on a multi-user host every
+# one of those secrets was world-readable for the window between the write and
+# the chmod. Setting the umask HERE — before any file is created — closes that
+# window for every file this script writes (.env, the fetched compose file, temp
+# files), rather than trying to remember a chmod at each call site.
+#
+# The explicit `chmod 600 "$ENV_FILE"` calls below are retained: umask only
+# constrains the mode of files this script CREATES, so a `.env` left behind
+# world-readable by an older installer still has to be tightened on re-run.
+umask 077
 
 # ── Defaults ─────────────────────────────────────────────────────────
 INSTALL_DIR="${PWD}/fseven"
@@ -107,29 +122,6 @@ verify_sha256() {
     die "$label checksum mismatch: expected $expected, got $actual"
   fi
   log "Verified $label SHA-256: $actual"
-}
-
-health_ready_once() {
-  local base_url="$1"
-  if command -v curl >/dev/null 2>&1; then
-    curl -fsS "${base_url}/health/ready" >/dev/null 2>&1
-  elif command -v wget >/dev/null 2>&1; then
-    wget -q -O - "${base_url}/health/ready" >/dev/null 2>&1
-  else
-    return 1
-  fi
-}
-
-wait_for_health_ready() {
-  local base_url="$1" timeout_secs="$2" deadline
-  deadline=$(( $(date +%s) + timeout_secs ))
-  while [[ $(date +%s) -lt $deadline ]]; do
-    if health_ready_once "$base_url"; then
-      return 0
-    fi
-    sleep 2
-  done
-  return 1
 }
 
 manifest_get() {
@@ -232,6 +224,13 @@ if [[ -f "$ENV_FILE" ]]; then
   log "Existing .env found — reusing all values (no secret rotation)"
   # shellcheck disable=SC1090
   set -a; source "$ENV_FILE"; set +a
+  # Honor PORT from .env on re-runs unless overridden by --port.
+  if [[ "$CONTROLLER_PORT" == "$CONTROLLER_PORT_DEFAULT" && -n "${PORT:-}" ]]; then
+    CONTROLLER_PORT="$PORT"
+  fi
+  # Backfill CREDENTIAL_ENCRYPTION_KEY for installs that predate the
+  # controller's encrypted-credential requirement (controller startup
+  # rejects empty key outside dev). Mirrors private installer behavior.
   if [[ -z "${CREDENTIAL_ENCRYPTION_KEY:-}" ]]; then
     CREDENTIAL_ENCRYPTION_KEY="$(gen_secret)"
     cat >> "$ENV_FILE" <<ENV
@@ -242,40 +241,42 @@ ENV
     chmod 600 "$ENV_FILE"
     log "Added missing CREDENTIAL_ENCRYPTION_KEY to existing .env"
   fi
+  # Backfill FSEVEN_APP_DB_PASSWORD for installs that predate the CD10 RLS
+  # serving-role cutover (Audit Run 35, CD10; synced to the published compose by
+  # Audit Run 36, PB8). The updated compose binds the controller serving pool to
+  # the least-privilege `fseven_app` role via DATABASE_URL=fseven_app:${FSEVEN_APP_DB_PASSWORD:?}
+  # — without this secret `docker compose up` fails closed. The controller
+  # provisions + verifies the role from this password at startup, so generating a
+  # fresh one here is safe (no existing fseven_app credential to preserve on a
+  # pre-cutover install). POSTGRES_PASSWORD is never regenerated; only this new
+  # least-privilege secret is added.
   if [[ -z "${FSEVEN_APP_DB_PASSWORD:-}" ]]; then
     FSEVEN_APP_DB_PASSWORD="$(gen_secret)"
     cat >> "$ENV_FILE" <<ENV
 
-# Added by install.sh on $(date -u +%Y-%m-%dT%H:%M:%SZ) for the least-privilege
-# fseven_app DB role (Audit Run 34, CD1/CD9/INF4). Provisioned + verified at
-# startup; the serving pool cuts over to it in issue #200.
+# Added by install.sh on $(date -u +%Y-%m-%dT%H:%M:%SZ) for the CD10 RLS serving-role
+# cutover (PB8). Password for the least-privilege fseven_app DB role.
 FSEVEN_APP_DB_PASSWORD=${FSEVEN_APP_DB_PASSWORD}
 ENV
     chmod 600 "$ENV_FILE"
     log "Added missing FSEVEN_APP_DB_PASSWORD to existing .env"
-  fi
-  # Honor PORT from .env on re-runs unless overridden by --port.
-  if [[ "$CONTROLLER_PORT" == "$CONTROLLER_PORT_DEFAULT" && -n "${PORT:-}" ]]; then
-    CONTROLLER_PORT="$PORT"
   fi
   FRESH_INSTALL=no
 else
   log "Generating .env with fresh secrets"
   POSTGRES_PASSWORD="$(gen_secret)"
   ADMIN_API_KEY="$(gen_secret)"
-  # Least-privilege application DB role password (Audit Run 34, Sprint 1.1).
-  # Migration 113 creates `fseven_app` and the controller provisions + verifies
-  # it at startup with this secret. The serving pool connects as the owner role
-  # until issue #200 stages the cutover (DATABASE_URL → fseven_app + per-request
-  # app.current_org_id GUC). Always generated.
+  # Password for the least-privilege `fseven_app` DB role used by the controller
+  # serving pool after the CD10 RLS serving-role cutover (Audit Run 35, CD10/#229;
+  # synced into the published compose by Audit Run 36, PB8). The compose binds
+  # DATABASE_URL to fseven_app:${FSEVEN_APP_DB_PASSWORD:?}, so a missing value
+  # fails `docker compose up` closed — generate a strong one here.
   FSEVEN_APP_DB_PASSWORD="$(gen_secret)"
   # Credential-encryption key is a single-line hex string — fits
-  # cleanly in a docker-compose env-file. The JWT signing key, by
-  # contrast, is a multi-line Ed25519 PEM which the env-file format
-  # can't represent reliably; in Community mode the controller
-  # auto-generates an ephemeral JWT key on first boot (logs a warning
-  # — PROPOSAL-community-deployment §4.6 calls for this to move into
-  # the DB-persisted bootstrap in a follow-up).
+  # cleanly in a docker-compose env-file. The JWT signing key is a
+  # multi-line Ed25519 PEM; it is provisioned separately in Step 3c
+  # (PB4) once the compose file is on disk, because that step verifies
+  # the value actually renders before committing to it.
   CREDENTIAL_ENCRYPTION_KEY="$(gen_secret)"
   cat > "$ENV_FILE" <<ENV
 # Generated by install.sh on $(date -u +%Y-%m-%dT%H:%M:%SZ)
@@ -344,26 +345,123 @@ if [[ "$FRESH_INSTALL" == "yes" ]]; then
   fi
 fi
 
+# ── Step 3c. Persistent JWT signing key (PB4) ────────────────────────
+# Without CONTROLLER_JWT_PRIVATE_KEY the community controller falls back to
+# a signing key it generates itself. On controller images at or before v0.2.2
+# (the currently published `:latest`) that key is EPHEMERAL — the controller
+# logs "generating ephemeral key (tokens won't survive restart)" — so every
+# `docker compose restart` / host reboot mints a fresh key and invalidates
+# every outstanding agent bearer token. (Admin dashboard sessions use an
+# opaque DB-backed `fseven_session` cookie and are NOT affected; the blast
+# radius is agent tokens.) Newer controller builds persist a bootstrap key
+# under the model-storage volume, but the published image lags that change,
+# so the installer cannot rely on it.
+#
+# The historical reason this was left unset is that the signing key is a
+# multi-line Ed25519 PEM and this script asserted a docker-compose env-file
+# "can't represent it reliably". Compose v2's dotenv parser does support
+# multi-line double-quoted values (it renders them as a YAML block scalar),
+# so we provision the key here — and, crucially, we VERIFY it renders through
+# `docker compose config` before keeping it. If the local compose build cannot
+# parse the value we restore the previous .env and fall back to the
+# controller-generated key, so a parser gap degrades to today's behaviour
+# instead of breaking the install.
+#
+# Only written when absent: an existing CONTROLLER_JWT_PRIVATE_KEY is never
+# rotated (same contract as POSTGRES_PASSWORD).
+# PB5 (Audit Run 37): .env.pb4.bak is a FULL PLAINTEXT COPY of every secret in
+# .env — POSTGRES_PASSWORD, FSEVEN_APP_DB_PASSWORD, ADMIN_API_KEY,
+# CREDENTIAL_ENCRYPTION_KEY, and the JWT PEM on a re-run. `umask 077` (top of file)
+# means it is CREATED 0600, so unlike the Windows path it is never world-readable —
+# but if this script dies in the window below (any command failing under `set -e`,
+# Ctrl-C, SIGTERM) the copy is left behind on disk permanently, long after the
+# installer that knew it was temporary is gone.
+pb4_backup_clean() { rm -f "$ENV_FILE.pb4.bak"; }
+
+# A signal handler MUST terminate the script itself. Bash runs an INT/TERM/HUP
+# trap and then *RESUMES* at the next command — so `trap 'rm -f …' EXIT INT TERM HUP`
+# (Audit Run 37 / PR #31) deleted the backup and then carried straight on to
+# `docker compose pull` / `up`, SWALLOWING the operator's Ctrl-C. Before that trap
+# existed, Ctrl-C aborted the install (default disposition); after it, the abort was
+# ignored. Restore the abort: clean up, restore the default disposition, and
+# re-raise, so the process really dies by the signal and the parent shell sees
+# death-by-signal rather than success. `exit` is the belt-and-braces fallback for
+# the case where the signal is blocked or ignored (128+signum, the conventional
+# status a shell reports for a signal-killed child).
+pb4_backup_abort() {
+  local sig="$1" status="$2"
+  pb4_backup_clean
+  trap - EXIT "$sig"
+  kill -"$sig" "$$" 2>/dev/null || true
+  exit "$status"
+}
+
+if ! grep -q '^CONTROLLER_JWT_PRIVATE_KEY=' "$ENV_FILE"; then
+  if command -v openssl >/dev/null 2>&1; then
+    JWT_PEM="$(openssl genpkey -algorithm ed25519 2>/dev/null || true)"
+    if [[ "$JWT_PEM" == *"BEGIN PRIVATE KEY"* ]]; then
+      # Armed BEFORE the cp so even a failing cp is covered; disarmed after the
+      # rm/mv below has done its job.
+      trap 'pb4_backup_clean' EXIT
+      trap 'pb4_backup_abort INT 130'  INT
+      trap 'pb4_backup_abort TERM 143' TERM
+      trap 'pb4_backup_abort HUP 129'  HUP
+      cp "$ENV_FILE" "$ENV_FILE.pb4.bak"
+      {
+        printf '\n# Added by install.sh on %s — persistent Ed25519 JWT signing\n' \
+          "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+        printf '# key (Audit Run 37, PB4). Keep this value: rotating it invalidates every\n'
+        printf '# outstanding agent bearer token and forces each agent to re-authenticate.\n'
+        printf '# Multi-line double-quoted values are parsed by docker compose v2 and by\n'
+        printf '# the `source` on the re-run path above.\n'
+        printf 'CONTROLLER_JWT_PRIVATE_KEY="%s\n"\n' "$JWT_PEM"
+      } >> "$ENV_FILE"
+      chmod 600 "$ENV_FILE"
+      if docker compose --profile community config 2>/dev/null \
+           | grep -q 'BEGIN PRIVATE KEY'; then
+        rm -f "$ENV_FILE.pb4.bak"
+        log "Provisioned a persistent JWT signing key (sessions now survive controller restarts)"
+      else
+        mv "$ENV_FILE.pb4.bak" "$ENV_FILE"
+        chmod 600 "$ENV_FILE"
+        warn "This docker compose build could not render a multi-line PEM from .env —
+         leaving CONTROLLER_JWT_PRIVATE_KEY unset. The controller will generate
+         its own signing key; on controller images ≤ v0.2.2 that key is ephemeral,
+         so agent bearer tokens are invalidated on every restart (PB4)."
+      fi
+      # Window closed: the backup is gone on both branches (rm / mv).
+      trap - EXIT INT TERM HUP
+    else
+      warn "openssl could not generate an Ed25519 key — skipping persistent JWT key (PB4)."
+    fi
+  else
+    warn "openssl not found — skipping the persistent JWT signing key (PB4).
+         The controller will generate its own key; on images ≤ v0.2.2 that key is
+         ephemeral, so agent bearer tokens are invalidated on every restart.
+         Install openssl and re-run install.sh to fix this permanently."
+  fi
+fi
+
 # ── Step 4. Pull + up ────────────────────────────────────────────────
 log "Pulling latest controller image"
 if ! docker compose --profile community pull 2>&1 | tee /tmp/fseven-pull.log; then
-  if grep -qiE 'manifest unknown|not found|denied' /tmp/fseven-pull.log; then
-    # INF8 (Audit Run 34/35): only fall back to a local build when a Dockerfile is
-    # actually present (i.e. running from a source checkout). The published
-    # installer is synced to public-agent-binaries, which ships docker-compose.yml
-    # but NO Dockerfile — there `docker compose build` would fail with a confusing
-    # error. Fail closed with an actionable message instead.
-    if [[ -f Dockerfile ]]; then
-      warn "Image pull failed (image may not yet be published for this tag).
-           Falling back to a local build from the working tree."
-      docker compose --profile community build
-    else
-      die "Image pull failed: no controller image is published for this tag, and
-           there is no local Dockerfile to build from. This is the published
-           installer, which pulls a prebuilt image and cannot build from source.
-           Pin a published release (set CONTROLLER_IMAGE or use a released tag)
-           and re-run. See /tmp/fseven-pull.log for the pull error."
-    fi
+  if grep -qiE 'manifest unknown|not found|denied|unauthorized' /tmp/fseven-pull.log; then
+    rm -f /tmp/fseven-pull.log
+    die "Image pull failed: the controller image could not be fetched from the registry.
+
+This installer is published from the public-agent-binaries repo, which
+intentionally does NOT contain a Dockerfile or controller source — it is
+a distribution shell only. There is no local-build fallback (PD2).
+
+To recover:
+  1. Confirm CONTROLLER_IMAGE points at a published tag, e.g.
+       export CONTROLLER_IMAGE=ghcr.io/f7-platform/public-agent-binaries/controller:<tag>
+     and re-run install.sh. The default 'latest' is sometimes unavailable
+     between releases; pin a specific version from the public release notes.
+  2. If you are behind a registry mirror or air-gapped, follow the
+     air-gapped install steps in the public docs (search 'air-gapped').
+  3. If you are entitled to the source build, use the private
+     fseven-controller repo and its 'docker build' instructions there."
   else
     die "Image pull failed for an unrecognised reason; see /tmp/fseven-pull.log"
   fi
@@ -378,64 +476,79 @@ docker compose --profile community up -d
 # final step of first-run bootstrap. Polling for that file is more
 # reliable than grepping the log stream (which has a race against the
 # 60 s deadline on slow machines / fresh DB migrations).
-DASHBOARD_URL="http://localhost:${CONTROLLER_PORT}"
-log "Waiting for first-run bootstrap (up to 120 s)…"
-DEADLINE=$(( $(date +%s) + 120 ))
+# FSEVEN_BOOTSTRAP_TIMEOUT_SECS: how long to wait for first-run bootstrap.
+# Raise it on slow machines / cold DB migrations; lower it to reach the
+# "bootstrap did not complete" branch quickly (the installer contract tests
+# exercise that branch with a 2 s deadline).
+BOOTSTRAP_TIMEOUT_SECS="${FSEVEN_BOOTSTRAP_TIMEOUT_SECS:-120}"
+log "Waiting for first-run bootstrap (up to ${BOOTSTRAP_TIMEOUT_SECS} s)…"
+DEADLINE=$(( $(date +%s) + BOOTSTRAP_TIMEOUT_SECS ))
 SECRETS_PATH="/app/model-storage/bootstrap/secrets.env"
 ADMIN_EMAIL=""
-ADMIN_PASSWORD=""
+BOOTSTRAP_READY="no"
 while [[ $(date +%s) -lt $DEADLINE ]]; do
   # Read the secrets file from inside the container. Succeeds the moment
   # bootstrap commits; exits non-zero until then.
   if creds=$(docker compose exec -T controller cat "$SECRETS_PATH" 2>/dev/null); then
     ADMIN_EMAIL=$(printf '%s\n' "$creds" \
       | grep -E '^FSEVEN_BOOTSTRAP_ADMIN_EMAIL=' | cut -d= -f2- | tr -d '\r')
-    ADMIN_PASSWORD=$(printf '%s\n' "$creds" \
-      | grep -E '^FSEVEN_BOOTSTRAP_ADMIN_PASSWORD=' | cut -d= -f2- | tr -d '\r')
-    if [[ -n "$ADMIN_EMAIL" && -n "$ADMIN_PASSWORD" ]]; then
+    if [[ -n "$ADMIN_EMAIL" ]] && printf '%s\n' "$creds" | grep -qE '^FSEVEN_BOOTSTRAP_ADMIN_PASSWORD='; then
+      BOOTSTRAP_READY="yes"
       break
     fi
   fi
-  # Already-bootstrapped re-run: bootstrap secrets may have been deleted by
-  # the stale-secret reaper after first use, so readiness is the source of truth.
-  if [[ "$FRESH_INSTALL" == "no" ]] && health_ready_once "$DASHBOARD_URL"; then
+  # Already-bootstrapped re-run: secrets.env exists from a previous run
+  # but the banner was not re-emitted. Break on "healthcheck ready".
+  if [[ "$FRESH_INSTALL" == "no" ]] \
+     && docker compose logs --no-color controller 2>/dev/null \
+          | grep -q "Listening (healthcheck ready)"; then
     break
   fi
   sleep 2
 done
 
-log "Waiting for controller readiness at ${DASHBOARD_URL}/health/ready (up to 120 s)…"
-if ! wait_for_health_ready "$DASHBOARD_URL" 120; then
-  die "Controller did not become ready. Check logs with: docker compose logs controller"
-fi
-
 # ── Step 6. Print URLs + credentials ─────────────────────────────────
+# PB3 (Audit Run 34/37): the controller writes the one-time bootstrap password
+# in CLEARTEXT to `secrets.env` on the model-storage volume. Newer controller
+# builds delete it on the first successful admin login; the published `:latest`
+# (v0.2.2) image predates that, so the installer must tell the operator to scrub
+# it. The Run-34 fix printed this guidance ONLY on the happy path — but the
+# credential is on disk on EVERY branch that reaches here (a re-run and a
+# bootstrap-timeout both leave the same cleartext file behind, and both of those
+# branches told the operator how to REVEAL the password while never telling them
+# to delete it). Emit it from one function called by every branch so the
+# guidance cannot drift back out of one of them.
+print_scrub_guidance() {
+  printf '  \033[1;33m→ After you have logged in, delete the one-time credentials file\n'
+  printf '    (the bootstrap password is stored in cleartext at rest):\033[0m\n'
+  printf '       docker compose exec controller rm -f %s\n' "$SECRETS_PATH"
+  printf '     (newer controller images remove it automatically on first login)\n\n'
+}
+
+DASHBOARD_URL="http://localhost:${CONTROLLER_PORT}"
 printf '\n\033[1;32m✓\033[0m fseven controller is running at %s\n\n' "$DASHBOARD_URL"
-if [[ -n "$ADMIN_EMAIL" && -n "$ADMIN_PASSWORD" ]]; then
+if [[ "$BOOTSTRAP_READY" == "yes" ]]; then
   printf '  \033[1mAdmin login\033[0m\n'
   printf '  Email:     %s\n' "$ADMIN_EMAIL"
-  printf '  Password:  %s\n' "$ADMIN_PASSWORD"
+  printf '  Password:  stored once at %s\n' "$SECRETS_PATH"
   printf '  Setup:     %s/setup\n' "$DASHBOARD_URL"
-  printf '\n  (credentials also persisted inside the controller at\n'
-  printf '   %s — in the model-storage Docker volume)\n\n' "$SECRETS_PATH"
-  printf '  \033[1mNext steps\033[0m\n'
-  printf '    1. Log in and rotate the password under Admin → Profile.\n'
-  printf '    2. Open %s/admin/settings/connect\n' "$DASHBOARD_URL"
-  printf '       for your 6-digit pairing code, then install the agent on\n'
-  printf '       any endpoint from https://github.com/f7-platform/public-agent-binaries/releases/latest\n\n'
+  printf '\n  Reveal the one-time password only when ready to log in:\n'
+  printf '    docker compose exec controller sh -lc '\''grep ^FSEVEN_BOOTSTRAP_ADMIN_PASSWORD= %s | cut -d= -f2-'\''\n\n' "$SECRETS_PATH"
+  printf '  \033[1;33m→ Log in once, then rotate the password under Admin → Profile.\033[0m\n'
+  print_scrub_guidance
 elif [[ "$FRESH_INSTALL" == "no" ]]; then
   printf 'Dashboard:  %s\n' "$DASHBOARD_URL"
-  printf '(Admin credentials were printed on first run. If the bootstrap handoff\n'
-  printf ' has not expired, retrieve them with:\n'
-  printf '   docker compose exec controller cat %s\n' "$SECRETS_PATH"
-  printf ' Otherwise use the admin password reset flow; stale bootstrap secrets\n'
-  printf ' are deleted automatically after first-run handoff.)\n\n'
+  printf '(Bootstrap credentials are only shown on demand; retrieve the one-time password with:\n'
+  printf '   docker compose exec controller sh -lc '\''grep ^FSEVEN_BOOTSTRAP_ADMIN_PASSWORD= %s | cut -d= -f2-'\''\n' "$SECRETS_PATH"
+  printf ' if you still have the model-storage volume.)\n\n'
+  print_scrub_guidance
 else
   # Fresh install but bootstrap did not complete within the deadline.
-  printf '\033[1;33m⚠ Bootstrap did not complete within 120 s.\033[0m\n'
+  printf '\033[1;33m⚠ Bootstrap did not complete within %s s.\033[0m\n' "$BOOTSTRAP_TIMEOUT_SECS"
   printf 'Check logs:  docker compose logs controller\n'
   printf 'Once bootstrap finishes, get credentials with:\n'
-  printf '   docker compose exec controller cat %s\n\n' "$SECRETS_PATH"
+  printf '   docker compose exec controller sh -lc '\''grep ^FSEVEN_BOOTSTRAP_ADMIN_PASSWORD= %s | cut -d= -f2-'\''\n\n' "$SECRETS_PATH"
+  print_scrub_guidance
 fi
 
 # ── Step 7. Self-observer chaining (PR-19) ───────────────────────────
@@ -554,7 +667,14 @@ install_agent() {
   # agent config loader consults; if the agent binary shipping in the
   # pkg doesn't yet consume it, the pair-server flow (PR-10) kicks in
   # as the fallback.
+  #
+  # PB5 (Audit Run 34/37): the seed file is created mode-0600 BEFORE the token
+  # is written to it (`install -m 0600 /dev/null`), not created at the umask
+  # default and chmod'ed afterwards — otherwise the token is briefly readable by
+  # every local user between the write and the chmod. The trailing chmod is kept
+  # so a pre-existing file from an earlier install is also tightened.
   sudo mkdir -p /etc/fseven
+  sudo install -m 0600 /dev/null /etc/fseven/enrollment-seed.toml
   printf 'enrollment_token = "%s"\ncontroller_url = "http://localhost:%s"\n' \
     "$token" "$CONTROLLER_PORT" \
     | sudo tee /etc/fseven/enrollment-seed.toml >/dev/null
