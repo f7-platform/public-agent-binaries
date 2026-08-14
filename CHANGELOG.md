@@ -6,6 +6,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 
 ## [Unreleased]
 
+### Security
+
+- **(Audit Run 38, INF32) `.github/workflows/static-checks.yml`: the 3 floating
+  `actions/checkout@v4` refs are pinned to the full commit SHA**
+  (`11d5960a326750d5838078e36cf38b85af677262`, the `v4` tag head, = v4.4.0 — no
+  version upgrade). A floating tag executes whatever the publisher points it at;
+  the SHA pin makes any change to executed action code a reviewable diff here.
+  `audit-evidence-gate.yml` was already pinned.
+  (Refs fseven-atlas-mvp#1982)
+
 ### Added
 
 - **(Audit Run 38, PB17 — backfill of three undocumented changes):**
