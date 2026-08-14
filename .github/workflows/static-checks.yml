@@ -56,7 +56,7 @@ jobs:
       FSEVEN_REQUIRE_PWSH: '1'
       FSEVEN_REQUIRE_TOOLS: '1'
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Shell syntax
         run: |
@@ -89,7 +89,7 @@ jobs:
     if: github.event_name != 'schedule'
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: install.ps1 Windows ACL gate (PB5)
         shell: pwsh
@@ -109,7 +109,7 @@ jobs:
       # or an unreadable image a hard failure here, never a green no-op.
       FSEVEN_REQUIRE_DOCKER: '1'
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Published controller image >= compose floor (#29)
         run: bash tests/controller-image-parity.sh
