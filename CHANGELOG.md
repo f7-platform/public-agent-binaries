@@ -6,6 +6,38 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 
 ## [Unreleased]
 
+### Added
+
+- **(Audit Run 38, PB17 — backfill of three undocumented changes):**
+  - **`tests/controller-image-parity.sh` + the #29 dead-on-arrival incident it
+    prevents** (commit `07b3031`): the v0.3.0 release-sync force-overwrote this
+    repo's installer files and reverted their hardening, shipping a compose that
+    could not boot against the published controller image. The parity gate now
+    asserts the compose's expectations against the actual published
+    `ghcr.io/...:latest` image so a source/publish mismatch fails a test instead
+    of a customer's first `docker compose up`.
+  - **`x-fseven-controller-contract.min_controller_version: v0.3.0`**
+    (docker-compose.yml): the machine-readable floor that makes the compose's
+    controller-version assumption checkable by the parity gate rather than
+    implicit.
+  - **Redis compose service (Audit Run 37, CC10 / CTL-AUTH-2)**
+    (docker-compose.yml, `redis` profile): opt-in shared rate-limit store so N
+    controller replicas increment ONE bucket instead of each granting the full
+    quota (effective limits were N× configured without it).
+
+  These landed without CHANGELOG entries — the same discipline gap PB11
+  (run 37) closed once for the OpenFGA-playground default; PB17 is a fresh
+  instance for new content, recorded here.
+
+### Fixed
+
+- **(Audit Run 38, PB18 — CONTRIBUTING pointed at a test that does not exist):**
+  `CONTRIBUTING.md` told contributors to run `bash tests/smoke.sh`; no such file
+  has ever existed in `tests/`. The step now names the three real checks
+  (`bootstrap-handoff-static.sh`, `controller-image-parity.sh`,
+  `install-ps1-acl-windows.ps1`).
+
+
 ### Security
 
 - **(Audit Run 37, INF7 — mutable image tags in the published compose):** the
