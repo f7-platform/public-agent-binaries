@@ -16,8 +16,11 @@ welcome here.
 1. **Open an issue first** — describe the problem or improvement so we can
    discuss before you write code.
 2. **Fork and branch** — create a feature branch from `main`.
-3. **Test your changes** — run `bash tests/smoke.sh` to verify the installer
-   scripts (requires Docker).
+3. **Test your changes** — run the checks in `tests/`:
+   `bash tests/bootstrap-handoff-static.sh` (installer bootstrap-handoff
+   invariants, no Docker needed) and `bash tests/controller-image-parity.sh`
+   (published-image parity, requires Docker); on Windows,
+   `tests/install-ps1-acl-windows.ps1` covers the installer ACLs.
 4. **Open a pull request** — fill in the PR template; link the related issue.
 
 ## Code of conduct
