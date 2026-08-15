@@ -197,11 +197,16 @@ function Add-PersistentJwtKey {
     # bearer token.
     #
     # Without this key the community controller falls back to a signing key it
-    # generates itself, and on the published image (<= v0.2.2) that key is
-    # EPHEMERAL: every `docker compose restart` / host reboot mints a new one and
-    # invalidates every agent bearer token. install.sh has provisioned this key
-    # since Run 34; install.ps1 did NOT, so until now every Windows community
-    # install still booted on an ephemeral key. This closes that parity gap.
+    # generates itself. On images at or before v0.2.2 that fallback was
+    # EPHEMERAL: every `docker compose restart` / host reboot minted a new one
+    # and invalidated every agent bearer token. Since v0.3.0 — which is what the
+    # published `:latest` serves — the controller persists the generated key to
+    # `<model-storage>/bootstrap/jwt-signing.pem` and reloads it on later boots,
+    # so tokens do survive a restart. Provisioning it here still matters: a key
+    # in `.env` belongs to the operator and outlives the model-storage volume
+    # the fallback key lives on. install.sh has provisioned it since Run 34;
+    # install.ps1 did NOT, so Windows community installs booted without one
+    # until this closed the parity gap.
     param(
         [string]$EnvFile,
         [switch]$VerifyRender
