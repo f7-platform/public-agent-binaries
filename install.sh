@@ -509,10 +509,14 @@ done
 
 # ── Step 6. Print URLs + credentials ─────────────────────────────────
 # PB3 (Audit Run 34/37): the controller writes the one-time bootstrap password
-# in CLEARTEXT to `secrets.env` on the model-storage volume. Newer controller
-# builds delete it on the first successful admin login; the published `:latest`
-# (v0.2.2) image predates that, so the installer must tell the operator to scrub
-# it. The Run-34 fix printed this guidance ONLY on the happy path — but the
+# in CLEARTEXT to `secrets.env` on the model-storage volume. Controller images
+# at or after v0.3.0 — which is what `:latest` has published since 2026-07-14 —
+# delete it on the first successful admin login, but it sits there in cleartext
+# until that login happens and stays indefinitely for an operator who never
+# completes one, so the installer still tells them to scrub it. (This comment
+# said the published image predated the delete-on-login behavior; that was true
+# of v0.2.2 and stopped being true when v0.3.0 published.) The Run-34 fix
+# printed this guidance ONLY on the happy path — but the
 # credential is on disk on EVERY branch that reaches here (a re-run and a
 # bootstrap-timeout both leave the same cleartext file behind, and both of those
 # branches told the operator how to REVEAL the password while never telling them

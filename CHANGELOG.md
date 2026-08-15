@@ -204,6 +204,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
   The write itself is controller-side and remains outside this repository; newer
   controller builds delete the file automatically on the first admin login, but
   the currently published image predates that change.
+
+  *Correction (Audit Run 39): that closing clause was true when written and is
+  no longer. The published `controller:latest` has been v0.3.0 since 2026-07-14,
+  and v0.3.0 is the release that ships the delete-on-first-login behaviour. Both
+  installers still print the scrub guidance, because the file is written in
+  cleartext and stays on disk until that first login happens — indefinitely for
+  an operator who never completes one.*
 - **CRITICAL (Audit Run 36, PB8):** synced the CD10 RLS serving-role cutover into
   the published distribution artifacts. The published `docker-compose.yml`
   controller `DATABASE_URL` now connects as the least-privilege `fseven_app` role
