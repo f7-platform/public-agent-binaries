@@ -6,6 +6,9 @@ name: Audit Evidence Gate
 # Two responsibilities:
 # 1. issues.closed   — auto-reopen any audit:run-N issue closed without an
 #                       execution evidence-table comment or an APPROVED verifier comment.
+#                       An ACCEPTED close also strips status:needs-reaudit, so a
+#                       reopen-then-good-close cannot strand the marker on a
+#                       closed issue (fseven-platform#86, the meta#82 artifact).
 # 2. issue_comment   — when the audit-verifier agent posts a verdict=APPROVED
 #                       comment, remove status:needs-reaudit and close the issue.
 #                       verdict=REJECTED takes no automated action.
@@ -48,6 +51,27 @@ jobs:
               return;
             }
 
+            // fseven-platform#86: strip the reopen marker on ANY accepted close.
+            // The removal used to live only in the verifier-autoclose job, so a
+            // hand-close-with-evidence left the issue CLOSED while still carrying
+            // status:needs-reaudit — a state that reads as a rejected closure to
+            // every later sweep (meta#82's timeline; 99 closed issues measured
+            // carrying the label as pure artifact on 2026-09-01). not_planned
+            // closes return above and deliberately keep whatever they carry.
+            const stripReaudit = async () => {
+              if (!labels.includes('status:needs-reaudit')) return;
+              try {
+                await github.rest.issues.removeLabel({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: issue.number,
+                  name: 'status:needs-reaudit',
+                });
+              } catch (e) {
+                core.warning(`Could not remove status:needs-reaudit: ${e.message}`);
+              }
+            };
+
             const comments = await github.paginate(github.rest.issues.listComments, {
               owner: context.repo.owner,
               repo: context.repo.repo,
@@ -79,6 +103,7 @@ jobs:
             });
             if (verifierApproved) {
               core.info(`Issue #${issue.number} has a trusted verifier APPROVED — gate passes.`);
+              await stripReaudit();
               return;
             }
 
@@ -107,6 +132,7 @@ jobs:
 
             if (hasEvidence) {
               core.info(`Issue #${issue.number} closed with execution evidence — gate passes.`);
+              await stripReaudit();
               return;
             }
 
