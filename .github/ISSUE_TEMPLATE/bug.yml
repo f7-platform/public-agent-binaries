@@ -1,0 +1,98 @@
+# DEPLOYED COPY — canonical: fseven-platform/.github/issue-label-gate/ plus fseven-platform/labels.json. Do not edit here; change the canonical and run fseven-platform/scripts/deploy-issue-label-gate.sh.
+name: Bug
+description: Something built does not behave as specified.
+title: "<surface>: <what is wrong, in one line>"
+labels: ["type:bug", "status:triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Every issue carries exactly one `type:`, `priority:`, `complexity:`, `scope:` and `status:` label. This form sets type and status; pick priority, complexity and code owner below and the label gate applies them. Rules: `fseven-platform/.claude/ISSUE-LABELS.md`.
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: One or two sentences. What is wrong, on which surface.
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1.
+        2.
+        3.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+      description: Include the error text, log line or screenshot.
+    validations:
+      required: true
+  - type: dropdown
+    id: priority
+    attributes:
+      label: Priority
+      description: How soon this is worked relative to everything else.
+      options:
+        - "critical — blocks the MVP production path, exploitable security flaw, or data loss"
+        - "high — needed for MVP production or a live UAT path; a flake in a required check"
+        - "medium — planned work that improves the product; no date pressure"
+        - "low — polish, tech debt without risk, nice-to-have"
+    validations:
+      required: true
+  - type: dropdown
+    id: complexity
+    attributes:
+      label: Complexity
+      description: How hard for one dispatched agent. high routes to the top model; be conservative.
+      options:
+        - "low — one repo, one surface, known fix shape, no design decision"
+        - "medium — several files or one crate/app, tests to write, fix shape to discover"
+        - "high — crosses repos or contracts, needs an ADR or ruling, trust plane, migration, or unknown blast radius"
+    validations:
+      required: true
+  - type: dropdown
+    id: scope
+    attributes:
+      label: Code owner
+      description: The repository where the fix lands. Cross-repo work is split into one issue per repo.
+      options:
+        - "public-agent-binaries — this repository"
+        - "fseven-atlas-mvp"
+        - "fseven-backbone"
+        - "fseven-schemas"
+        - "fseven-docs"
+        - "fseven-identity-providers"
+        - "fseven-controller"
+        - "fseven-agent"
+        - "fseven-platform"
+        - "fseven-relay"
+        - "public-docs"
+        - "public-agent-binaries"
+        - "public-atlas-binaries"
+      default: 0
+    validations:
+      required: true
+  - type: textarea
+    id: files
+    attributes:
+      label: Affected files
+      description: Paths you already know are involved, `path:line` where possible.
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+      description: The checkable conditions under which this is done. An issue without them cannot be promoted to `status:ready-for-agent`.
+      placeholder: |
+        - [ ]
+        - [ ]

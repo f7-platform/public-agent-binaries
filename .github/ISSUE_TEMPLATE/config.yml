@@ -1,0 +1,9 @@
+# DEPLOYED COPY — canonical: fseven-platform/.github/issue-label-gate/ plus fseven-platform/labels.json. Do not edit here; change the canonical and run fseven-platform/scripts/deploy-issue-label-gate.sh.
+# Blank issues are disabled in the web UI so every hand-filed issue passes through a
+# form that sets its routing labels. `gh issue create` still works; the label gate
+# workflow catches anything it leaves unrouted and holds it in status:triage.
+blank_issues_enabled: false
+contact_links:
+  - name: Label rules and the routing contract
+    url: https://github.com/f7-platform/fseven-platform/blob/main/.claude/ISSUE-LABELS.md
+    about: What the five label dimensions mean and how an issue moves between statuses.
