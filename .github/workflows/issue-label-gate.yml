@@ -1,0 +1,182 @@
+# DEPLOYED COPY — canonical: fseven-platform/.github/issue-label-gate/ plus fseven-platform/labels.json. Do not edit here; change the canonical and run fseven-platform/scripts/deploy-issue-label-gate.sh.
+#
+# Issue label gate: enforces the canonical label contract (fseven-platform/labels.json,
+# rules in fseven-platform/.claude/ISSUE-LABELS.md) on every issue in this repository.
+#
+# On every issue open, edit, label, unlabel, reopen or transfer it:
+#   1. rewrites legacy aliases (bug -> type:bug, P0 -> priority:critical, ...);
+#   2. reads the issue-form dropdowns (Priority, Complexity, Code owner) into labels;
+#   3. derives priority and type for audit:run-N issues from their severity;
+#   4. defaults scope:<this repo> when no scope label is present;
+#   5. adds status:triage when no status label is present;
+#   6. demotes status:ready-for-agent back to status:triage when any routing
+#      dimension (type, priority, complexity, scope) is missing or doubled, so an
+#      agent worklist can never pick up an unrouted issue; a wave item with the same
+#      defect is flagged, not unlabelled (the board is the hub's to edit);
+#   7. lets the gate-owned status:needs-reaudit win over any other status;
+#   8. maintains ONE bot comment (marker <!-- issue-label-gate -->) listing what is
+#      still missing, and marks it resolved when the issue becomes fully routed.
+# It never deletes labels it does not own and never closes or reopens anything.
+name: issue-label-gate
+
+on:
+  issues:
+    types: [opened, edited, labeled, unlabeled, reopened, transferred]
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: issue-label-gate-${{ github.event.issue.number }}
+  cancel-in-progress: false
+
+jobs:
+  gate:
+    # Skip the events this workflow's own label writes produce, except the
+    # evidence gate's status:needs-reaudit, which must be reconciled at once.
+    if: >-
+      github.event.sender.login != 'github-actions[bot]' ||
+      (github.event.action == 'labeled' && github.event.label.name == 'status:needs-reaudit')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/github-script@v7
+        with:
+          script: |
+            const CONTRACT = {"dimensions":{"type":{"prefix":"type:","labels":[{"name":"type:bug"},{"name":"type:enhancement"},{"name":"type:task"},{"name":"type:docs"},{"name":"type:epic"},{"name":"type:research"},{"name":"type:residuals"}],"extra_labels":[]},"priority":{"prefix":"priority:","labels":[{"name":"priority:critical"},{"name":"priority:high"},{"name":"priority:medium"},{"name":"priority:low"}],"extra_labels":[]},"complexity":{"prefix":"complexity:","labels":[{"name":"complexity:low"},{"name":"complexity:medium"},{"name":"complexity:high"}],"extra_labels":[]},"scope":{"prefix":"scope:","labels":[],"extra_labels":[{"name":"scope:fseven-atlas"}]},"status":{"prefix":"status:","labels":[{"name":"status:triage"},{"name":"status:needs-info"},{"name":"status:needs-decision"},{"name":"status:ready-for-agent"},{"name":"status:blocked"},{"name":"status:needs-reaudit"},{"name":"status:icebox"},{"name":"status:tracking"}],"extra_labels":[]}},"aliases":{"map":{"bug":"type:bug","enhancement":"type:enhancement","documentation":"type:docs","P0":"priority:critical","P1":"priority:high","P2":"priority:medium","severity:critical":"priority:critical","severity:high":"priority:high","severity:medium":"priority:medium","severity:low":"priority:low","icebox":"status:icebox","blocked":"status:blocked","decision-needed":"status:needs-decision"}},"audit":{"run_label_pattern":"^audit:run-[0-9]+$","severity_to_priority":{"audit:severity-critical":"priority:critical","audit:severity-high":"priority:high","audit:severity-medium":"priority:medium","audit:severity-low":"priority:low","audit:severity-info":"priority:low"}}};
+            const MARKER = '<!-- issue-label-gate -->';
+            const { owner, repo } = context.repo;
+            const number = context.payload.issue.number;
+
+            // Fresh read: the payload's label list can be stale when events race.
+            const issue = (await github.rest.issues.get({ owner, repo, issue_number: number })).data;
+            if (issue.pull_request) return;
+            const body = issue.body || '';
+            const have = new Set(issue.labels.map(l => typeof l === 'string' ? l : l.name));
+            const add = new Set();
+            const remove = new Set();
+            const problems = [];
+            const actions = [];
+
+            const dims = CONTRACT.dimensions;
+            const dimNames = ['type', 'priority', 'complexity', 'scope', 'status'];
+            const prefixOf = d => dims[d].prefix;
+            const effective = () => new Set([...have, ...add].filter(l => !remove.has(l)));
+            const inDim = (d, set) => [...set].filter(l => l.startsWith(prefixOf(d)));
+            const known = new Set();
+            for (const d of dimNames) for (const l of (dims[d].labels || [])) known.add(l.name);
+            for (const l of (dims.scope.extra_labels || [])) known.add(l.name);
+            // scope labels are derived from the repository list; accept any scope:* that exists in this repo.
+            const repoLabels = new Set((await github.paginate(github.rest.issues.listLabelsForRepo, { owner, repo, per_page: 100 })).map(l => l.name));
+
+            // 1. Aliases.
+            for (const [alias, target] of Object.entries(CONTRACT.aliases.map)) {
+              if (have.has(alias)) {
+                remove.add(alias); add.add(target);
+                actions.push(`rewrote \`${alias}\` to \`${target}\``);
+              }
+            }
+
+            // 2. Issue-form dropdowns. A form renders "### Heading\n\nvalue"; the value's first
+            //    token is the key ("high — needed for MVP" -> high). Only fills an empty dimension.
+            const formValue = heading => {
+              const m = body.match(new RegExp('###\\s+' + heading + '\\s*\\n+\\s*([^\\n]+)', 'i'));
+              if (!m) return null;
+              const v = m[1].trim();
+              if (!v || /^_no response_$/i.test(v) || /^none$/i.test(v)) return null;
+              // Split on whitespace or the em dash only: repository names contain hyphens.
+              return v.split(/\s+|—/)[0].toLowerCase();
+            };
+            const formFill = (dim, heading, mapper) => {
+              if (inDim(dim, effective()).length > 0) return;
+              const key = formValue(heading);
+              if (!key) return;
+              const label = mapper(key);
+              if (label && (known.has(label) || repoLabels.has(label))) {
+                add.add(label); actions.push(`set \`${label}\` from the form's ${heading} field`);
+              }
+            };
+            formFill('priority', 'Priority', k => `priority:${k}`);
+            formFill('complexity', 'Complexity', k => `complexity:${k}`);
+            formFill('scope', 'Code owner', k => `scope:${k}`);
+            formFill('type', 'Type', k => `type:${k}`);
+
+            // 3. Audit issues: type and priority follow the finding.
+            const runRe = new RegExp(CONTRACT.audit.run_label_pattern);
+            const isAudit = [...effective()].some(l => runRe.test(l));
+            if (isAudit) {
+              if (inDim('type', effective()).length === 0) { add.add('type:task'); actions.push('set `type:task` (audit remediation)'); }
+              if (inDim('priority', effective()).length === 0) {
+                for (const [sev, pri] of Object.entries(CONTRACT.audit.severity_to_priority)) {
+                  if (effective().has(sev)) { add.add(pri); actions.push(`set \`${pri}\` from \`${sev}\``); break; }
+                }
+              }
+            }
+
+            // 4. Scope defaults to the filing repository.
+            if (inDim('scope', effective()).length === 0) {
+              const s = `scope:${repo}`;
+              if (repoLabels.has(s)) { add.add(s); actions.push(`set \`${s}\` (filing repository)`); }
+              else problems.push(`no \`scope:\` label exists for this repository; run \`scripts/sync-labels.sh\` in fseven-platform`);
+            }
+
+            // 5. Status defaults to triage.
+            if (inDim('status', effective()).length === 0) {
+              add.add('status:triage'); actions.push('set `status:triage` (no status was present)');
+            }
+
+            // 6./7. Exactly-one rules and the routing gate.
+            let routed = true;
+            for (const d of ['type', 'priority', 'complexity', 'scope']) {
+              const got = inDim(d, effective());
+              if (got.length === 0) { routed = false; problems.push(`missing \`${prefixOf(d)}*\` (exactly one required)`); }
+              else if (got.length > 1) { routed = false; problems.push(`more than one \`${prefixOf(d)}*\`: ${got.map(x => '`' + x + '`').join(', ')} (keep exactly one)`); }
+            }
+            let statuses = inDim('status', effective());
+            if (statuses.length > 1) {
+              if (statuses.includes('status:needs-reaudit')) {
+                for (const s of statuses) if (s !== 'status:needs-reaudit') remove.add(s);
+                actions.push('kept gate-owned `status:needs-reaudit`, removed the other status labels');
+              } else {
+                problems.push(`more than one \`status:*\`: ${statuses.map(x => '`' + x + '`').join(', ')} (keep exactly one)`);
+              }
+            }
+            statuses = inDim('status', effective());
+            if (!routed && statuses.includes('status:ready-for-agent')) {
+              remove.add('status:ready-for-agent'); add.add('status:triage');
+              actions.push('demoted `status:ready-for-agent` to `status:triage`: an agent worklist may not pick up an unrouted issue');
+            }
+            if (!routed && effective().has('wave')) {
+              problems.push('this issue is on the wave board (`wave`) but is not fully routed; the relay bus cannot pick a model for it');
+            }
+
+            // Apply.
+            const toAdd = [...add].filter(l => !have.has(l));
+            const toRemove = [...remove].filter(l => have.has(l));
+            for (const l of toRemove) {
+              try { await github.rest.issues.removeLabel({ owner, repo, issue_number: number, name: l }); } catch (e) { if (e.status !== 404) throw e; }
+            }
+            if (toAdd.length) {
+              await github.rest.issues.addLabels({ owner, repo, issue_number: number, labels: toAdd });
+            }
+
+            // 8. One comment, updated in place.
+            const comments = await github.paginate(github.rest.issues.listComments, { owner, repo, issue_number: number, per_page: 100 });
+            const mine = comments.find(c => c.user && c.user.type === 'Bot' && (c.body || '').includes(MARKER));
+            const lines = [MARKER, '**Issue label gate**', ''];
+            if (problems.length) {
+              lines.push('This issue is not fully routed. Until every line below is fixed it stays in `status:triage` and no agent worklist or lane may take it.', '');
+              for (const p of problems) lines.push(`- ${p}`);
+              lines.push('', 'Rules: `fseven-platform/.claude/ISSUE-LABELS.md`. Set the labels, or edit the form fields above, and the gate re-checks on save.');
+            } else {
+              lines.push('Routing labels are complete: one each of `type:`, `priority:`, `complexity:`, `scope:`, `status:`.');
+            }
+            if (actions.length) { lines.push('', 'Changes made by the gate on this run:'); for (const a of actions) lines.push(`- ${a}`); }
+            const text = lines.join('\n');
+            if (problems.length || actions.length) {
+              if (mine) await github.rest.issues.updateComment({ owner, repo, comment_id: mine.id, body: text });
+              else await github.rest.issues.createComment({ owner, repo, issue_number: number, body: text });
+            } else if (mine && !(mine.body || '').includes('Routing labels are complete')) {
+              await github.rest.issues.updateComment({ owner, repo, comment_id: mine.id, body: text });
+            }
+            core.summary.addHeading(`#${number}`).addRaw(text).write();
