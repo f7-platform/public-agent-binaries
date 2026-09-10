@@ -17,25 +17,42 @@
 #   8. maintains ONE bot comment (marker <!-- issue-label-gate -->) listing what is
 #      still missing, and marks it resolved when the issue becomes fully routed.
 # It never deletes labels it does not own and never closes or reopens anything.
+#
+# The same steps run daily over EVERY open issue (the schedule below, or a manual
+# workflow_dispatch). An issue filed before this workflow reached the default
+# branch, or one whose `issues: opened` run was dropped, never fires a creation
+# event and would otherwise sit outside the contract forever: the sweep is the
+# backstop that finds it. In sweep mode the gate reads an issue's comments only
+# when it has something to say about that issue, which keeps a repository with
+# hundreds of open issues inside the GITHUB_TOKEN hourly request budget.
+# Note that GitHub suspends `schedule` in a repository with no activity for 60
+# days; `deploy-issue-label-gate.sh --check` does not detect that, and a manual
+# workflow_dispatch re-arms it.
 name: issue-label-gate
 
 on:
   issues:
     types: [opened, edited, labeled, unlabeled, reopened, transferred]
+  schedule:
+    # Daily, well off the hour so the fleet's repositories do not all sweep at once.
+    - cron: '37 6 * * *'
+  workflow_dispatch:
 
 permissions:
   contents: read
   issues: write
 
 concurrency:
-  group: issue-label-gate-${{ github.event.issue.number }}
+  group: issue-label-gate-${{ github.event.issue.number || 'sweep' }}
   cancel-in-progress: false
 
 jobs:
   gate:
     # Skip the events this workflow's own label writes produce, except the
     # evidence gate's status:needs-reaudit, which must be reconciled at once.
+    # A schedule or a dispatch has no sender and is never skipped.
     if: >-
+      github.event_name != 'issues' ||
       github.event.sender.login != 'github-actions[bot]' ||
       (github.event.action == 'labeled' && github.event.label.name == 'status:needs-reaudit')
     runs-on: ubuntu-latest
@@ -46,11 +63,23 @@ jobs:
             const CONTRACT = {"dimensions":{"type":{"prefix":"type:","labels":[{"name":"type:bug"},{"name":"type:enhancement"},{"name":"type:task"},{"name":"type:docs"},{"name":"type:epic"},{"name":"type:research"},{"name":"type:residuals"}],"extra_labels":[]},"priority":{"prefix":"priority:","labels":[{"name":"priority:critical"},{"name":"priority:high"},{"name":"priority:medium"},{"name":"priority:low"}],"extra_labels":[]},"complexity":{"prefix":"complexity:","labels":[{"name":"complexity:low"},{"name":"complexity:medium"},{"name":"complexity:high"}],"extra_labels":[]},"scope":{"prefix":"scope:","labels":[],"extra_labels":[{"name":"scope:fseven-atlas"}]},"status":{"prefix":"status:","labels":[{"name":"status:triage"},{"name":"status:needs-info"},{"name":"status:needs-decision"},{"name":"status:ready-for-agent"},{"name":"status:blocked"},{"name":"status:needs-reaudit"},{"name":"status:icebox"},{"name":"status:tracking"}],"extra_labels":[]}},"aliases":{"map":{"bug":"type:bug","enhancement":"type:enhancement","documentation":"type:docs","P0":"priority:critical","P1":"priority:high","P2":"priority:medium","severity:critical":"priority:critical","severity:high":"priority:high","severity:medium":"priority:medium","severity:low":"priority:low","icebox":"status:icebox","blocked":"status:blocked","decision-needed":"status:needs-decision"}},"audit":{"run_label_pattern":"^audit:run-[0-9]+$","severity_to_priority":{"audit:severity-critical":"priority:critical","audit:severity-high":"priority:high","audit:severity-medium":"priority:medium","audit:severity-low":"priority:low","audit:severity-info":"priority:low"}}};
             const MARKER = '<!-- issue-label-gate -->';
             const { owner, repo } = context.repo;
-            const number = context.payload.issue.number;
+            // One event carries one issue; a schedule or a dispatch sweeps every open one.
+            const SWEEP = context.eventName !== 'issues';
 
-            // Fresh read: the payload's label list can be stale when events race.
-            const issue = (await github.rest.issues.get({ owner, repo, issue_number: number })).data;
-            if (issue.pull_request) return;
+            const dims = CONTRACT.dimensions;
+            const dimNames = ['type', 'priority', 'complexity', 'scope', 'status'];
+            const prefixOf = d => dims[d].prefix;
+            const known = new Set();
+            for (const d of dimNames) for (const l of (dims[d].labels || [])) known.add(l.name);
+            for (const l of (dims.scope.extra_labels || [])) known.add(l.name);
+            // scope labels are derived from the repository list; accept any scope:* that exists in this repo.
+            // Read once: in sweep mode this list is the same for every issue.
+            const repoLabels = new Set((await github.paginate(github.rest.issues.listLabelsForRepo, { owner, repo, per_page: 100 })).map(l => l.name));
+
+            // Apply the contract to one issue. Returns the text it wrote to that issue's
+            // comment, or null when it had nothing to say.
+            const gateIssue = async issue => {
+            const number = issue.number;
             const body = issue.body || '';
             const have = new Set(issue.labels.map(l => typeof l === 'string' ? l : l.name));
             const add = new Set();
@@ -58,16 +87,8 @@ jobs:
             const problems = [];
             const actions = [];
 
-            const dims = CONTRACT.dimensions;
-            const dimNames = ['type', 'priority', 'complexity', 'scope', 'status'];
-            const prefixOf = d => dims[d].prefix;
             const effective = () => new Set([...have, ...add].filter(l => !remove.has(l)));
             const inDim = (d, set) => [...set].filter(l => l.startsWith(prefixOf(d)));
-            const known = new Set();
-            for (const d of dimNames) for (const l of (dims[d].labels || [])) known.add(l.name);
-            for (const l of (dims.scope.extra_labels || [])) known.add(l.name);
-            // scope labels are derived from the repository list; accept any scope:* that exists in this repo.
-            const repoLabels = new Set((await github.paginate(github.rest.issues.listLabelsForRepo, { owner, repo, per_page: 100 })).map(l => l.name));
 
             // 1. Aliases.
             for (const [alias, target] of Object.entries(CONTRACT.aliases.map)) {
@@ -160,7 +181,10 @@ jobs:
               await github.rest.issues.addLabels({ owner, repo, issue_number: number, labels: toAdd });
             }
 
-            // 8. One comment, updated in place.
+            // 8. One comment, updated in place. A sweep over hundreds of issues reads the
+            //    comment list only for an issue it has something to say about; on an issue
+            //    event it reads them anyway, so a now-complete issue's comment is resolved.
+            if (SWEEP && !problems.length && !actions.length) return null;
             const comments = await github.paginate(github.rest.issues.listComments, { owner, repo, issue_number: number, per_page: 100 });
             const mine = comments.find(c => c.user && c.user.type === 'Bot' && (c.body || '').includes(MARKER));
             const lines = [MARKER, '**Issue label gate**', ''];
@@ -172,6 +196,7 @@ jobs:
               lines.push('Routing labels are complete: one each of `type:`, `priority:`, `complexity:`, `scope:`, `status:`.');
             }
             if (actions.length) { lines.push('', 'Changes made by the gate on this run:'); for (const a of actions) lines.push(`- ${a}`); }
+            if (SWEEP) { lines.push('', '_Found by the daily sweep, not by this issue\'s creation or edit event._'); }
             const text = lines.join('\n');
             if (problems.length || actions.length) {
               if (mine) await github.rest.issues.updateComment({ owner, repo, comment_id: mine.id, body: text });
@@ -179,4 +204,28 @@ jobs:
             } else if (mine && !(mine.body || '').includes('Routing labels are complete')) {
               await github.rest.issues.updateComment({ owner, repo, comment_id: mine.id, body: text });
             }
-            core.summary.addHeading(`#${number}`).addRaw(text).write();
+            return text;
+            };
+
+            // Targets: the event's issue, or every open issue when sweeping.
+            let targets;
+            if (SWEEP) {
+              targets = await github.paginate(github.rest.issues.listForRepo, { owner, repo, state: 'open', per_page: 100 });
+            } else {
+              // Fresh read: the payload's label list can be stale when events race.
+              targets = [(await github.rest.issues.get({ owner, repo, issue_number: context.payload.issue.number })).data];
+            }
+            targets = targets.filter(i => !i.pull_request);
+
+            const summary = core.summary;
+            let touched = 0;
+            for (const issue of targets) {
+              const text = await gateIssue(issue);
+              if (text === null) continue;
+              touched += 1;
+              summary.addHeading(`#${issue.number}`, 3).addRaw(text);
+            }
+            if (SWEEP) {
+              summary.addHeading(`Sweep: ${touched} of ${targets.length} open issues needed the gate`, 2);
+            }
+            await summary.write();
