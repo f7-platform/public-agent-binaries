@@ -6,7 +6,12 @@
 # On every issue open, edit, label, unlabel, reopen or transfer it:
 #   1. rewrites legacy aliases (bug -> type:bug, P0 -> priority:critical, ...);
 #   2. reads the issue-form dropdowns (Priority, Complexity, Code owner) into labels;
-#   3. derives priority and type for audit:run-N issues from their severity;
+#   3. derives priority and type for audit:run-N issues from their severity, and
+#      holds an issue whose TITLE reads `[Audit Run N]` but which carries no
+#      audit:run-N label, naming the label it lacks rather than adding it
+#      (fseven-platform#100 — that label is what audit-evidence-gate.yml keys
+#      every closure control on, so an issue without it can be closed with no
+#      evidence and nothing reopens it);
 #   4. defaults scope:<this repo> when no scope label is present;
 #   5. adds status:triage when no status label is present;
 #   6. demotes status:ready-for-agent back to status:triage when any routing
@@ -57,7 +62,7 @@ jobs:
       (github.event.action == 'labeled' && github.event.label.name == 'status:needs-reaudit')
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/github-script@v7
+      - uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
         with:
           script: |
             const CONTRACT = {"dimensions":{"type":{"prefix":"type:","labels":[{"name":"type:bug"},{"name":"type:enhancement"},{"name":"type:task"},{"name":"type:docs"},{"name":"type:epic"},{"name":"type:research"},{"name":"type:residuals"}],"extra_labels":[]},"priority":{"prefix":"priority:","labels":[{"name":"priority:critical"},{"name":"priority:high"},{"name":"priority:medium"},{"name":"priority:low"}],"extra_labels":[]},"complexity":{"prefix":"complexity:","labels":[{"name":"complexity:low"},{"name":"complexity:medium"},{"name":"complexity:high"}],"extra_labels":[]},"scope":{"prefix":"scope:","labels":[],"extra_labels":[{"name":"scope:fseven-atlas"}]},"status":{"prefix":"status:","labels":[{"name":"status:triage"},{"name":"status:needs-info"},{"name":"status:needs-decision"},{"name":"status:ready-for-agent"},{"name":"status:blocked"},{"name":"status:needs-reaudit"},{"name":"status:icebox"},{"name":"status:tracking"}],"extra_labels":[]}},"aliases":{"map":{"bug":"type:bug","enhancement":"type:enhancement","documentation":"type:docs","P0":"priority:critical","P1":"priority:high","P2":"priority:medium","severity:critical":"priority:critical","severity:high":"priority:high","severity:medium":"priority:medium","severity:low":"priority:low","icebox":"status:icebox","blocked":"status:blocked","decision-needed":"status:needs-decision"}},"audit":{"run_label_pattern":"^audit:run-[0-9]+$","severity_to_priority":{"audit:severity-critical":"priority:critical","audit:severity-high":"priority:high","audit:severity-medium":"priority:medium","audit:severity-low":"priority:low","audit:severity-info":"priority:low"}}};
@@ -125,6 +130,12 @@ jobs:
             // 3. Audit issues: type and priority follow the finding.
             const runRe = new RegExp(CONTRACT.audit.run_label_pattern);
             const isAudit = [...effective()].some(l => runRe.test(l));
+            // The run number the TITLE claims, if this is a mint-contract audit title
+            // (`[Audit Run N][Sprint S.A] ...`). Read here, beside isAudit, because this
+            // is where the run label is interpreted; acted on at 6. below, where the
+            // routing verdict lives.
+            const titleRun = (issue.title || '').match(/^\[Audit Run (\d+)\]/);
+            const missingRunLabel = titleRun && !isAudit ? `audit:run-${titleRun[1]}` : null;
             if (isAudit) {
               if (inDim('type', effective()).length === 0) { add.add('type:task'); actions.push('set `type:task` (audit remediation)'); }
               if (inDim('priority', effective()).length === 0) {
@@ -152,6 +163,27 @@ jobs:
               const got = inDim(d, effective());
               if (got.length === 0) { routed = false; problems.push(`missing \`${prefixOf(d)}*\` (exactly one required)`); }
               else if (got.length > 1) { routed = false; problems.push(`more than one \`${prefixOf(d)}*\`: ${got.map(x => '`' + x + '`').join(', ')} (keep exactly one)`); }
+            }
+            // fseven-platform#100: an audit remediation title carrying no audit:run-N
+            // label. `audit-evidence-gate.yml` gates its whole enforce-close job on
+            // `audit:run-` and its script returns when no label matches the pattern, and
+            // the verifier-approval job returns the same way, so an issue minted without
+            // the label is invisible to every closure-quality control while looking
+            // identical to a governed issue: it can be closed with no evidence and
+            // nothing reopens it. Measured on 2026-09-11: 65 closed issues across nine
+            // repositories, all from runs 28 to 31.
+            //
+            // The gate NAMES the label and holds the issue; it does not add it. That is
+            // deliberate and is narrower than 3. above, which fills type and priority
+            // only for an issue that ALREADY carries a run label — there the label is
+            // the gate's evidence that this is an audit issue. A label invented from a
+            // title would be the gate manufacturing its own evidence, and it would enrol
+            // in the evidence gate's reopen-on-close enforcement an issue nobody minted.
+            // The run labels are also the one family labels.json deliberately does not
+            // enumerate, so sync-labels.sh never creates them and only a /plan pass does.
+            if (missingRunLabel) {
+              routed = false;
+              problems.push(`the title reads \`[Audit Run ${titleRun[1]}]\` but no \`audit:run-*\` label is present: add \`${missingRunLabel}\`. Without it this issue is invisible to \`audit-evidence-gate.yml\`, which keys every closure control on that label, so it could be closed with no evidence and nothing would reopen it`);
             }
             let statuses = inDim('status', effective());
             if (statuses.length > 1) {
