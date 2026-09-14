@@ -13,7 +13,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
   SQL use sites. The hash is parsed out of the controller's mint response and
   was interpolated bare on the assumption that it is always hex; the value is
   now escaped on the same rule as every other value the script places inside a
-  SQL string, and the static checks guard the escaped form. (Refs #46)
+  SQL string, and the static checks guard the escaped form. (#50, Refs #46)
 
 - **(Audit Run 38, INF32) `.github/workflows/static-checks.yml`: the 3 floating
   `actions/checkout@v4` refs are pinned to the full commit SHA**
@@ -32,7 +32,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
   told contributors not to describe. The file now lists the actual tree and the
   GitHub Release plus GHCR image release shape, and the static checks guard
   the stale layout out of `CLAUDE.md` as they already did for the Copilot file.
-  (Refs #46)
+  (#50, Refs #46)
 
 - **(Audit Run 38, PB17 — backfill of three undocumented changes):**
   - **`tests/controller-image-parity.sh` + the #29 dead-on-arrival incident it
