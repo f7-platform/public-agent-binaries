@@ -690,11 +690,13 @@ install_agent() {
   fi
   rm -f "$installer_tmp"
 
-  # Poll the token's use_count to detect enrollment. token_hash is hex
-  # (no SQL escaping needed) and avoids hostname-semantics mismatches
-  # between `hostname` here and the value the agent's hostname::get()
-  # actually reports. Falls back to hostname matching if the controller
-  # response didn't include token_hash (older API).
+  # Poll the token's use_count to detect enrollment. token_hash avoids
+  # hostname-semantics mismatches between `hostname` here and the value
+  # the agent's hostname::get() actually reports. Falls back to hostname
+  # matching if the controller response didn't include token_hash (older
+  # API). The hash is expected to be hex, but it is a value parsed out of
+  # an HTTP response, so it is quote-doubled into the SQL literal exactly
+  # as $host_name is at its use sites (PB27) rather than trusted on shape.
   log "Waiting for agent to enroll (up to 60 s)…"
   local poll_deadline=$(( $(date +%s) + 60 ))
   while [[ $(date +%s) -lt $poll_deadline ]]; do
@@ -702,7 +704,7 @@ install_agent() {
     if [[ -n "$token_hash" ]]; then
       seen="$(docker compose exec -T postgres \
                 psql -U seven -d seven_controller -tAc \
-                  "SELECT 1 FROM enrollment_tokens WHERE token_hash = '${token_hash}' AND use_count > 0" \
+                  "SELECT 1 FROM enrollment_tokens WHERE token_hash = '${token_hash//\'/\'\'}' AND use_count > 0" \
                 2>/dev/null | tr -d '[:space:]')" || true
     else
       seen="$(docker compose exec -T postgres \
