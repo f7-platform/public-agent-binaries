@@ -16,10 +16,16 @@
 #   5. adds status:triage when no status label is present;
 #   6. demotes status:ready-for-agent back to status:triage when any routing
 #      dimension (type, priority, complexity, scope) is missing or doubled, so an
-#      agent worklist can never pick up an unrouted issue; a wave item with the same
-#      defect is flagged, not unlabelled (the board is the hub's to edit);
-#   7. lets the gate-owned status:needs-reaudit win over any other status;
-#   8. maintains ONE bot comment (marker <!-- issue-label-gate -->) listing what is
+#      agent worklist can never pick up an unrouted issue;
+#   7. treats more than one status label as a routing fault and repairs it to the
+#      winner: the gate-owned status:needs-reaudit wins over any other status, and
+#      any other status wins over status:ready-for-agent; two statuses with no
+#      winner (status:blocked beside status:icebox, say) are held and named;
+#   8. derives the `wave` label from the status: an open issue whose one status is
+#      status:ready-for-agent after steps 6 and 7 carries `wave`, and any other open
+#      issue does not, so promotion is placement on the relay wave board
+#      (fseven-platform#195);
+#   9. maintains ONE bot comment (marker <!-- issue-label-gate -->) listing what is
 #      still missing, and marks it resolved when the issue becomes fully routed.
 # It never deletes labels it does not own and never closes or reopens anything.
 #
@@ -185,13 +191,30 @@ jobs:
               routed = false;
               problems.push(`the title reads \`[Audit Run ${titleRun[1]}]\` but no \`audit:run-*\` label is present: add \`${missingRunLabel}\`. Without it this issue is invisible to \`audit-evidence-gate.yml\`, which keys every closure control on that label, so it could be closed with no evidence and nothing would reopen it`);
             }
+            // More than one status label breaks the contract (labels.json makes the
+            // status dimension exactly_one) and is repaired to the winner. Rule 5 of
+            // ISSUE-LABELS.md makes the gate-owned status:needs-reaudit win over any
+            // other status; the audit evidence gate reopened issues with it beside
+            // status:triage until fseven-platform#195, and its label writes start no
+            // run of this workflow, so the sweep is what repairs one written before.
+            // status:ready-for-agent loses to any other status, because rule 2 makes
+            // promotion a deliberate act and an issue also marked blocked, icebox or
+            // triage has not cleanly had it. The contract names no winner between
+            // two other statuses, so the gate does not invent one: it holds the
+            // issue as unrouted and names both labels for a person to settle.
             let statuses = inDim('status', effective());
             if (statuses.length > 1) {
               if (statuses.includes('status:needs-reaudit')) {
                 for (const s of statuses) if (s !== 'status:needs-reaudit') remove.add(s);
-                actions.push('kept gate-owned `status:needs-reaudit`, removed the other status labels');
-              } else {
-                problems.push(`more than one \`status:*\`: ${statuses.map(x => '`' + x + '`').join(', ')} (keep exactly one)`);
+                actions.push(`kept gate-owned \`status:needs-reaudit\` and removed ${statuses.filter(s => s !== 'status:needs-reaudit').map(x => '`' + x + '`').join(', ')}: an issue carries exactly one status, and \`status:needs-reaudit\` wins over any other`);
+              } else if (statuses.includes('status:ready-for-agent')) {
+                remove.add('status:ready-for-agent');
+                actions.push(`removed \`status:ready-for-agent\`, which loses to ${statuses.filter(s => s !== 'status:ready-for-agent').map(x => '`' + x + '`').join(', ')}: an issue carries exactly one status, and one also marked otherwise has not cleanly been promoted`);
+              }
+              statuses = inDim('status', effective());
+              if (statuses.length > 1) {
+                routed = false;
+                problems.push(`more than one \`status:*\`: ${statuses.map(x => '`' + x + '`').join(', ')} (keep exactly one; the contract names no winner between these)`);
               }
             }
             statuses = inDim('status', effective());
@@ -199,8 +222,28 @@ jobs:
               remove.add('status:ready-for-agent'); add.add('status:triage');
               actions.push('demoted `status:ready-for-agent` to `status:triage`: an agent worklist may not pick up an unrouted issue');
             }
-            if (!routed && effective().has('wave')) {
-              problems.push('this issue is on the wave board (`wave`) but is not fully routed; the relay bus cannot pick a model for it');
+
+            // 8. `wave` follows status:ready-for-agent (fseven-platform#195, Ian's board
+            //    ruling of 2026-09-14). The relay bus offers only items carrying `wave`,
+            //    and promotion is the maintainer's act, so promotion itself is what puts
+            //    an item on the board and any other status takes it off. Read after 6./7.,
+            //    so an unrouted issue the gate just demoted, and one the evidence gate
+            //    marked for re-audit, lose `wave` on the same run. Two status labels at
+            //    once is not a clean promotion and does not keep an item on the board.
+            //    A closed issue is left as it is: the workflow does not listen to
+            //    `closed`, the sweep reads open issues only, and the bus ignores closed
+            //    items. A `source:rewind` issue gets no exception here; the bus refuses
+            //    one carrying `wave` without a recorded review (fseven-relay#610).
+            if (issue.state !== 'closed') {
+              const finalStatuses = inDim('status', effective());
+              const ready = routed && finalStatuses.length === 1 && finalStatuses[0] === 'status:ready-for-agent';
+              if (ready && !effective().has('wave')) {
+                if (repoLabels.has('wave')) { add.add('wave'); actions.push('set `wave` because the status is `status:ready-for-agent`: the gate derives `wave` from that status, so promotion places the issue on the relay wave board'); }
+                else problems.push('the status is `status:ready-for-agent` but no `wave` label exists for this repository, so the gate cannot place it on the relay wave board; run `scripts/sync-labels.sh` in fseven-platform');
+              } else if (!ready && effective().has('wave')) {
+                remove.add('wave');
+                actions.push('removed `wave` because the status is not `status:ready-for-agent`: the gate derives `wave` from that status, so an issue that is not ready leaves the relay wave board');
+              }
             }
 
             // Apply.
@@ -213,7 +256,7 @@ jobs:
               await github.rest.issues.addLabels({ owner, repo, issue_number: number, labels: toAdd });
             }
 
-            // 8. One comment, updated in place. A sweep over hundreds of issues reads the
+            // 9. One comment, updated in place. A sweep over hundreds of issues reads the
             //    comment list only for an issue it has something to say about; on an issue
             //    event it reads them anyway, so a now-complete issue's comment is resolved.
             if (SWEEP && !problems.length && !actions.length) return null;
