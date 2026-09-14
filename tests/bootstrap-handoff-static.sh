@@ -588,6 +588,35 @@ assert_not_contains \
   'SHA256SUMS' \
   'stale copilot instructions SHA256SUMS flow'
 
+# PB27: every operator-supplied or response-derived value that lands inside a
+# SQL string literal in install.sh is quote-doubled the same way. $host_name
+# already was; $token_hash (parsed out of the controller's mint response) was
+# interpolated bare on the assumption that it is always hex.
+assert_contains \
+  "$ROOT_DIR/install.sh" \
+  "token_hash = '\${token_hash//\\'/\\'\\'}'" \
+  'PB27: token_hash quote-doubled into the enrollment poll SQL literal'
+assert_not_contains \
+  "$ROOT_DIR/install.sh" \
+  "token_hash = '\${token_hash}'" \
+  'PB27: bare (unescaped) token_hash in a SQL literal'
+
+# PB24: CLAUDE.md and copilot-instructions.md are a pair and must describe the
+# same release shape. The stale v{version}/ raw-binary layout and SHA256SUMS
+# flow are guarded out of CLAUDE.md exactly as they are out of its sibling.
+assert_contains \
+  "$ROOT_DIR/CLAUDE.md" \
+  'release-manifest.json' \
+  'CLAUDE.md current manifest release flow'
+assert_not_contains \
+  "$ROOT_DIR/CLAUDE.md" \
+  'v{version}/' \
+  'stale CLAUDE.md versioned directory layout'
+assert_not_contains \
+  "$ROOT_DIR/CLAUDE.md" \
+  'SHA256SUMS' \
+  'stale CLAUDE.md SHA256SUMS flow'
+
 if command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; then
   rendered_compose="$(mktemp)"
   trap 'rm -f "$rendered_compose"' EXIT

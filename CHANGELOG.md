@@ -8,6 +8,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 
 ### Security
 
+- **(Audit Run 41, PB27) `install.sh`: `$token_hash` is quote-doubled into the
+  enrollment-poll SQL literal** exactly as `$host_name` already is at its two
+  SQL use sites. The hash is parsed out of the controller's mint response and
+  was interpolated bare on the assumption that it is always hex; the value is
+  now escaped on the same rule as every other value the script places inside a
+  SQL string, and the static checks guard the escaped form. (Refs #46)
+
 - **(Audit Run 38, INF32) `.github/workflows/static-checks.yml`: the 3 floating
   `actions/checkout@v4` refs are pinned to the full commit SHA**
   (`11d5960a326750d5838078e36cf38b85af677262`, the `v4` tag head, = v4.4.0 — no
@@ -17,6 +24,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
   (Refs fseven-atlas-mvp#1982)
 
 ### Added
+
+- **(Audit Run 41, PB24) `CLAUDE.md` describes the repository as it is.** Its
+  Structure section still described the `v{version}/` raw-binary layout and a
+  CI-generated `SHA256SUMS` file, a model this repository abandoned after its
+  first release and that its paired `.github/copilot-instructions.md` already
+  told contributors not to describe. The file now lists the actual tree and the
+  GitHub Release plus GHCR image release shape, and the static checks guard
+  the stale layout out of `CLAUDE.md` as they already did for the Copilot file.
+  (Refs #46)
 
 - **(Audit Run 38, PB17 — backfill of three undocumented changes):**
   - **`tests/controller-image-parity.sh` + the #29 dead-on-arrival incident it
