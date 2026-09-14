@@ -9,6 +9,10 @@ name: Audit Evidence Gate
 #                       An ACCEPTED close also strips status:needs-reaudit, so a
 #                       reopen-then-good-close cannot strand the marker on a
 #                       closed issue (fseven-platform#86, the meta#82 artifact).
+#                       A reopen REPLACES the issue's status label with
+#                       status:needs-reaudit, and a strip that leaves no status
+#                       puts back status:triage, so the issue always carries
+#                       exactly one status (fseven-platform#195).
 # 2. issue_comment   — when the audit-verifier agent posts a verdict=APPROVED
 #                       comment, remove status:needs-reaudit and close the issue.
 #                       verdict=REJECTED takes no automated action.
@@ -58,6 +62,12 @@ jobs:
             // every later sweep (meta#82's timeline; 99 closed issues measured
             // carrying the label as pure artifact on 2026-09-01). not_planned
             // closes return above and deliberately keep whatever they carry.
+            //
+            // The reopen below REPLACES the issue's status with status:needs-reaudit
+            // (fseven-platform#195), so once the marker is stripped the issue may
+            // carry no status at all. labels.json makes status exactly_one, so the
+            // strip puts back status:triage, the lifecycle's entry status, whenever
+            // no other status label remains.
             const stripReaudit = async () => {
               if (!labels.includes('status:needs-reaudit')) return;
               try {
@@ -69,6 +79,19 @@ jobs:
                 });
               } catch (e) {
                 core.warning(`Could not remove status:needs-reaudit: ${e.message}`);
+                return;
+              }
+              if (!labels.some(n => n.startsWith('status:') && n !== 'status:needs-reaudit')) {
+                try {
+                  await github.rest.issues.addLabels({
+                    owner: context.repo.owner,
+                    repo: context.repo.repo,
+                    issue_number: issue.number,
+                    labels: ['status:triage'],
+                  });
+                } catch (e) {
+                  core.warning(`Could not restore status:triage: ${e.message}`);
+                }
               }
             };
 
@@ -146,7 +169,18 @@ jobs:
               state: 'open',
             });
 
-            if (!labels.includes('status:needs-reaudit')) {
+            // status:needs-reaudit REPLACES the status the issue carried; it is not
+            // added beside it (fseven-platform#195). labels.json makes the status
+            // dimension exactly_one, and rule 5 of .claude/ISSUE-LABELS.md says
+            // needs-reaudit wins over any other status. The label gate would repair
+            // two status labels, but a label written here with GITHUB_TOKEN starts
+            // no workflow run, so the repair waited for its daily sweep:
+            // fseven-identity-providers#34 and fseven-atlas-mvp#3704 carried
+            // status:triage beside status:needs-reaudit on 2026-09-14. The marker
+            // goes on first and the old status comes off only once it is on, so a
+            // failed write never leaves the issue with no status.
+            let reauditOn = labels.includes('status:needs-reaudit');
+            if (!reauditOn) {
               try {
                 await github.rest.issues.addLabels({
                   owner: context.repo.owner,
@@ -154,8 +188,23 @@ jobs:
                   issue_number: issue.number,
                   labels: ['status:needs-reaudit'],
                 });
+                reauditOn = true;
               } catch (e) {
                 core.warning(`Could not add status:needs-reaudit label: ${e.message}`);
+              }
+            }
+            if (reauditOn) {
+              for (const name of labels.filter(n => n.startsWith('status:') && n !== 'status:needs-reaudit')) {
+                try {
+                  await github.rest.issues.removeLabel({
+                    owner: context.repo.owner,
+                    repo: context.repo.repo,
+                    issue_number: issue.number,
+                    name,
+                  });
+                } catch (e) {
+                  core.warning(`Could not remove ${name}, which status:needs-reaudit replaces: ${e.message}`);
+                }
               }
             }
 
@@ -234,7 +283,12 @@ jobs:
               `(association=${association}, allowlisted=${trustedByAllowlist}).`
             );
 
+            // The reopen replaced the issue's status with status:needs-reaudit
+            // (fseven-platform#195), so stripping the marker puts back
+            // status:triage when no other status label remains: labels.json makes
+            // the status dimension exactly_one.
             if (labels.includes('status:needs-reaudit')) {
+              let stripped = true;
               try {
                 await github.rest.issues.removeLabel({
                   owner: context.repo.owner,
@@ -243,7 +297,20 @@ jobs:
                   name: 'status:needs-reaudit',
                 });
               } catch (e) {
+                stripped = false;
                 core.warning(`Could not remove status:needs-reaudit: ${e.message}`);
+              }
+              if (stripped && !labels.some(n => n.startsWith('status:') && n !== 'status:needs-reaudit')) {
+                try {
+                  await github.rest.issues.addLabels({
+                    owner: context.repo.owner,
+                    repo: context.repo.repo,
+                    issue_number: issue.number,
+                    labels: ['status:triage'],
+                  });
+                } catch (e) {
+                  core.warning(`Could not restore status:triage: ${e.message}`);
+                }
               }
             }
 
