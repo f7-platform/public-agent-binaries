@@ -137,9 +137,13 @@ services:
     # start fallback only — pinning the always-moving `:latest` tag here would be
     # meaningless because it is rebuilt every release.
     image: ${CONTROLLER_IMAGE:-ghcr.io/f7-platform/public-agent-binaries/controller:latest}
-    build:
-      context: .
-      dockerfile: Dockerfile
+    # PAB2 (Audit Run 42): the source-of-truth compose in fseven-controller also
+    # carries a build stanza that builds the controller from that repo's own
+    # source and container recipe. It is deliberately NOT mirrored
+    # here: public-agent-binaries ships no controller source and no Dockerfile,
+    # so the stanza was inert and `docker compose build` against it could only
+    # fail. This deployment is image-only — pull the published image (PD2: there
+    # is no local-build fallback).
     container_name: fseven-controller
     restart: unless-stopped
     profiles: [community, prod]
