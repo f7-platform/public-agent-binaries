@@ -8,6 +8,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 
 ### Security
 
+- **(Audit Run 42, PAB1) `install.ps1`: `$tokenHash` is quote-doubled into the
+  enrollment-poll SQL literal**, as `PB27` did for `install.sh` and as
+  `$hostName` already was. The hash is parsed out of the controller's mint
+  response and was interpolated bare on the PowerShell side only.
+  `tests/bootstrap-handoff-static.sh` now pairs each `install.sh` function with
+  its `install.ps1` counterpart and fails when the SQL literals a pair issues
+  differ or carry an unescaped value, so the next such asymmetry fails CI
+  instead of waiting for an audit. (#55, Closes #53)
+
 - **(Audit Run 41, PB27) `install.sh`: `$token_hash` is quote-doubled into the
   enrollment-poll SQL literal** exactly as `$host_name` already is at its two
   SQL use sites. The hash is parsed out of the controller's mint response and
