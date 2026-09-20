@@ -601,6 +601,97 @@ assert_not_contains \
   "token_hash = '\${token_hash}'" \
   'PB27: bare (unescaped) token_hash in a SQL literal'
 
+# PAB1 (Run 42): the PB27 fix above landed on install.sh only, and install.ps1
+# kept interpolating $tokenHash bare into the same SQL literal for a whole
+# audit run. The two installers are one product in two languages, so the
+# check below is per FUNCTION rather than per grep: each bash function is
+# paired with its PowerShell counterpart, both must exist, and every SQL
+# string literal the pair issues must normalise to the same statement with
+# every interpolated value quote-doubled. A bare value on either side, or a
+# statement one side issues and the other does not, is a divergence and fails
+# here instead of waiting for the next audit.
+#
+# Normalisation: a bash `'${name//\'/\'\'}'` and a PowerShell `'$name'` whose
+# $name is assigned via .Replace("'", "''") both become '<ESCAPED>'; any other
+# `'$name'` becomes '<RAW>'. The pair is compared as ordered statement lists.
+installer_parity_pairs=(
+  'gen_secret=New-Secret'
+  'print_scrub_guidance=Write-ScrubGuidance'
+  'install_agent=Install-FsevenAgent'
+)
+
+sh_function_body() {
+  awk -v n="$1" '
+    $0 ~ ("^" n "\\(\\) *\\{") { f = 1 }
+    f { print }
+    f && /^}/ { exit }
+  ' "$ROOT_DIR/install.sh"
+}
+
+ps1_function_body() {
+  awk -v n="$1" '
+    $0 ~ ("^function " n "( |\\(|\\{|$)") { f = 1 }
+    f { print }
+    f && /^}/ { exit }
+  ' "$ROOT_DIR/install.ps1"
+}
+
+# Every "SELECT ..." double-quoted string in a function body, one per line,
+# with interpolations normalised as described above.
+sh_sql_fingerprint() {
+  local q="'"
+  grep -o '"SELECT [^"]*"' \
+    | sed -E \
+        -e "s/${q}\\\$\\{[A-Za-z_]+\\/\\/\\\\${q}\\/\\\\${q}\\\\${q}\\}${q}/${q}<ESCAPED>${q}/g" \
+        -e "s/${q}\\\$\\{?[A-Za-z_]+\\}?${q}/${q}<RAW>${q}/g"
+}
+
+ps1_sql_fingerprint() {
+  local body q="'" escaped_vars name sed_args=()
+  body="$(cat)"
+  # Variables this function derives via .Replace("'", "''") are the escaped ones.
+  escaped_vars="$(printf '%s\n' "$body" \
+    | grep -oE "^[[:space:]]*\\\$[A-Za-z_]+[[:space:]]*=.*\\.Replace\\(\"${q}\", \"${q}${q}\"\\)" \
+    | sed -E 's/^[[:space:]]*\$([A-Za-z_]+).*/\1/' || true)"
+  for name in $escaped_vars; do
+    sed_args+=(-e "s/${q}\\\$${name}${q}/${q}<ESCAPED>${q}/g")
+  done
+  sed_args+=(-e "s/${q}\\\$[A-Za-z_]+${q}/${q}<RAW>${q}/g")
+  printf '%s\n' "$body" | grep -o '"SELECT [^"]*"' | sed -E "${sed_args[@]}"
+}
+
+for pair in "${installer_parity_pairs[@]}"; do
+  sh_name="${pair%%=*}"
+  ps1_name="${pair#*=}"
+  sh_body="$(sh_function_body "$sh_name")"
+  ps1_body="$(ps1_function_body "$ps1_name")"
+  if [[ -z "$sh_body" ]]; then
+    printf 'PAB1: install.sh has no function %s (paired with install.ps1 %s)\n' "$sh_name" "$ps1_name" >&2
+    exit 1
+  fi
+  if [[ -z "$ps1_body" ]]; then
+    printf 'PAB1: install.ps1 has no function %s (paired with install.sh %s)\n' "$ps1_name" "$sh_name" >&2
+    exit 1
+  fi
+  sh_sql="$(printf '%s\n' "$sh_body" | sh_sql_fingerprint || true)"
+  ps1_sql="$(printf '%s\n' "$ps1_body" | ps1_sql_fingerprint || true)"
+  if printf '%s\n' "$sh_sql" | grep -Fq '<RAW>'; then
+    printf 'PAB1: install.sh %s interpolates a value bare into a SQL literal:\n%s\n' "$sh_name" "$sh_sql" >&2
+    exit 1
+  fi
+  if printf '%s\n' "$ps1_sql" | grep -Fq '<RAW>'; then
+    printf 'PAB1: install.ps1 %s interpolates a value bare into a SQL literal (quote-double it via .Replace("'"'"'", "'"''"'")):\n%s\n' "$ps1_name" "$ps1_sql" >&2
+    exit 1
+  fi
+  if [[ "$sh_sql" != "$ps1_sql" ]]; then
+    printf 'PAB1: SQL parity divergence between install.sh %s and install.ps1 %s\n' "$sh_name" "$ps1_name" >&2
+    diff <(printf '%s\n' "$sh_sql") <(printf '%s\n' "$ps1_sql") >&2 || true
+    exit 1
+  fi
+  printf 'PAB1: %s <-> %s SQL parity holds (%d statement(s), all escaped)\n' \
+    "$sh_name" "$ps1_name" "$(printf '%s\n' "$sh_sql" | grep -c 'SELECT' || true)"
+done
+
 # PB24: CLAUDE.md and copilot-instructions.md are a pair and must describe the
 # same release shape. The stale v{version}/ raw-binary layout and SHA256SUMS
 # flow are guarded out of CLAUDE.md exactly as they are out of its sibling.
