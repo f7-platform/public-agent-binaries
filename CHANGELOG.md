@@ -66,6 +66,25 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 
 ### Fixed
 
+- **(Audit Run 42, PAB2) `docker-compose.yml`: the controller service no longer
+  declares a `build:` stanza.** It pointed at a container recipe that exists
+  nowhere in this repository's tree — this repo ships installers and
+  documentation, not controller source — so the stanza was inert and building
+  from it could only fail. A comment in its place records that the
+  fseven-controller source-of-truth compose does build the controller from its
+  own source, and that the published mirror is image-only (PD2: there is no
+  local-build fallback). `tests/bootstrap-handoff-static.sh` now fails if a
+  re-sync drags the stanza back in. (#57, Closes #54)
+
+- **(Audit Run 42, PAB3) `CHANGELOG.md`: the Versioning Policy footer names the
+  `f7-platform` organisation.** It pointed readers at the historical releases
+  page under the organisation name this project used before the rename to
+  `f7-platform`, which no longer serves this project. The static checks now
+  scan the whole tracked tree for that old name — the scan's own needle in
+  `tests/bootstrap-handoff-static.sh` is the only occurrence left, and the
+  script excludes itself — so no document can reintroduce it.
+  (#57, Closes #54)
+
 - **(Audit Run 38, PB18 — CONTRIBUTING pointed at a test that does not exist):**
   `CONTRIBUTING.md` told contributors to run `bash tests/smoke.sh`; no such file
   has ever existed in `tests/`. The step now names the three real checks
@@ -349,4 +368,4 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 
 - Version bumps originate in `fseven-agent` release tags.
 - This repo only ever receives binaries; humans should not commit directly.
-- For historical releases, see the GitHub Releases page at `github.com/fseven-ai/fseven-agent`.
+- For historical releases, see the GitHub Releases page at `github.com/f7-platform/fseven-agent`.

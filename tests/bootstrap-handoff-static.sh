@@ -366,6 +366,20 @@ if [[ "$inf7_image_count" -lt 4 ]]; then
   exit 1
 fi
 
+# PAB2 (Run 42): public-agent-binaries ships no controller source and no
+# Dockerfile (the same fact PD2 rests on), so a `build:` stanza in the published
+# compose is inert and `docker compose build` against it can only fail. The
+# source-of-truth compose in fseven-controller does carry one; assert it is not
+# mirrored here, so a future re-sync that drags it back in fails this gate.
+assert_not_contains \
+  "$ROOT_DIR/docker-compose.yml" \
+  'dockerfile: Dockerfile' \
+  'PAB2: no inert build stanza in the published compose'
+if grep -Eq '^[[:space:]]*build:[[:space:]]*$' "$ROOT_DIR/docker-compose.yml"; then
+  printf 'PAB2: docker-compose.yml declares a build: stanza, but this repo ships no Dockerfile\n' >&2
+  exit 1
+fi
+
 # #29 (Run 37): INF7 pins the THIRD-PARTY images by digest; the FIRST-PARTY
 # controller image stays tag-referenced (`:latest`) so installs track releases.
 # That leaves the gap #29 named — the compose can depend on a controller capability
@@ -567,6 +581,23 @@ assert_contains \
   "$ROOT_DIR/CHANGELOG.md" \
   'Release notes should say which signing and notarization' \
   'per-release signing/notarization status'
+# PAB3 (Run 42): the org renamed from `fseven-ai` to `f7-platform`. The
+# CHANGELOG's Versioning Policy footer still pointed readers at the old
+# org's GitHub Releases page, which no longer serves this project. Scan the
+# whole tracked tree rather than the one line, so no document reintroduces it.
+# This gate script is excluded from its own scan: the needle below is the only
+# intentional occurrence of the old name left in the tree.
+pab3_stale_org="$(grep -rn --exclude-dir=.git \
+  --exclude='bootstrap-handoff-static.sh' -F 'fseven-ai' "$ROOT_DIR" || true)"
+if [[ -n "$pab3_stale_org" ]]; then
+  printf 'PAB3: stale `fseven-ai` org name(s) remain; the org is `f7-platform`:\n%s\n' "$pab3_stale_org" >&2
+  exit 1
+fi
+assert_contains \
+  "$ROOT_DIR/CHANGELOG.md" \
+  'github.com/f7-platform/fseven-agent' \
+  'PAB3: CHANGELOG versioning policy names the f7-platform org'
+
 assert_contains \
   "$ROOT_DIR/.github/copilot-instructions.md" \
   'release-manifest.json' \
