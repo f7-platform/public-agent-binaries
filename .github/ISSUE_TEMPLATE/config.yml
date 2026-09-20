@@ -2,8 +2,18 @@
 # Blank issues are disabled in the web UI so every hand-filed issue passes through a
 # form that sets its routing labels. `gh issue create` still works; the label gate
 # workflow catches anything it leaves unrouted and holds it in status:triage.
+#
+# The picker's link has to resolve for whoever can open this repository, and this set
+# deploys into public repositories as well as private ones. The link this replaces
+# pointed into fseven-platform, which is private, so on a public repository it
+# returned 404 to every visitor (audit run 42, PTB1). This repository's own labels
+# page is readable by exactly the audience that can read this file — anyone on a
+# public repository, any member on a private one — and it lists each label with the
+# description sync-labels.sh writes from labels.json, so it is one pointer that is
+# correct in both cases. The full rules live in a private file, so they are named
+# below in prose rather than linked.
 blank_issues_enabled: false
 contact_links:
-  - name: Label rules and the routing contract
-    url: https://github.com/f7-platform/fseven-platform/blob/main/.claude/ISSUE-LABELS.md
-    about: What the five label dimensions mean and how an issue moves between statuses.
+  - name: The labels this repository routes on
+    url: https://github.com/f7-platform/public-agent-binaries/labels
+    about: "Every issue carries exactly one type:, priority:, complexity:, scope: and status: label; this page lists them with what each one means. F7 members can read the routing rules and the status lifecycle in fseven-platform/.claude/ISSUE-LABELS.md."
