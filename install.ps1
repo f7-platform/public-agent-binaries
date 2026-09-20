@@ -642,6 +642,10 @@ function Install-FsevenAgent {
     $token = $response.token
     if (-not $token) { Write-Warn2 "Empty token response — skipping"; return }
     $tokenHash = $response.token_hash
+    # The hash is expected to be hex, but it is a value parsed out of an HTTP
+    # response, so it is quote-doubled into the SQL literal exactly as
+    # $hostName is ($escaped) rather than trusted on shape (PB27 / PAB1).
+    $tokenHashEscaped = ([string]$tokenHash).Replace("'", "''")
 
     $msiSha256 = if ($env:FSEVEN_AGENT_MSI_SHA256) { $env:FSEVEN_AGENT_MSI_SHA256 } else { $null }
     if ($env:FSEVEN_AGENT_MSI_URL) {
@@ -701,7 +705,7 @@ function Install-FsevenAgent {
         if ($tokenHash) {
             $seen = (docker compose exec -T postgres `
                        psql -U seven -d seven_controller -tAc `
-                         "SELECT 1 FROM enrollment_tokens WHERE token_hash = '$tokenHash' AND use_count > 0" `
+                         "SELECT 1 FROM enrollment_tokens WHERE token_hash = '$tokenHashEscaped' AND use_count > 0" `
                      2>$null).Trim()
         } else {
             $seen = (docker compose exec -T postgres `
