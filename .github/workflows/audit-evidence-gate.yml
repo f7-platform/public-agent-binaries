@@ -132,7 +132,10 @@ jobs:
 
             const STATUS_RE = /\b(VERIFIED|PARTIAL|ALREADY-PRESENT|BLOCKED)\b/;
             const SHA_RE = /\b[0-9a-f]{7,40}\b/i;
-            const TEST_RE = /cargo (test|build)|pnpm.*test|pytest|vitest|playwright|npm test/i;
+            // `cargo nextest` is the test command fseven-atlas-mvp prescribes and its
+            // required check runs; without it an evidence comment quoting that
+            // command exactly read as carrying no test result (fseven-atlas-mvp#4170).
+            const TEST_RE = /cargo (test|build|nextest)|pnpm.*test|pytest|vitest|playwright|npm test/i;
 
             // Actor provenance on the evidence-table path (INF6): the shape
             // checks below (status word + SHA/test token, or a long body) only
