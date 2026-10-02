@@ -11,9 +11,12 @@
 #   -Image <ref>        Override controller image
 #                        (default: ghcr.io/f7-platform/public-agent-binaries/controller:latest)
 #   -Port <int>         Host port for the controller (default 8080)
-#   -WithAgent          Also install the agent on this host
-#                        (non-interactive opt-in; PR-19 wires the real flow)
-#   -NoAgent            Skip the agent-install prompt
+#   -WithAgent          Also try to install the agent on this host. The
+#                        agent is shelved and the current release publishes
+#                        no agent installer, so the installer no longer asks;
+#                        this switch warns, then runs the agent step, which
+#                        needs FSEVEN_AGENT_MSI_URL and FSEVEN_AGENT_MSI_SHA256.
+#   -NoAgent            Skip the agent install (the default)
 #   -ProvisionEnvOnly   Write (or top up) the .env — including the persistent
 #                        Ed25519 JWT signing key — then exit WITHOUT touching
 #                        Docker. Use this to pre-provision an install directory
@@ -723,15 +726,14 @@ function Install-FsevenAgent {
     Write-Warn2 "Agent did not enroll within 60 s. Check the Windows Service 'FsevenAgent' and Event Viewer."
 }
 
-# Decide whether to run the agent install.
-$shouldInstall = $false
-if ($WithAgent)     { $shouldInstall = $true }
-elseif ($NoAgent)   { $shouldInstall = $false }
-elseif ([Environment]::UserInteractive -and [Console]::In.Peek -and -not [Console]::IsInputRedirected) {
-    $reply = Read-Host 'Install the agent on this machine too? [Y/n]'
-    if ($reply -eq '' -or $reply -match '^[Yy]') { $shouldInstall = $true }
-}
+# Decide whether to run the agent install. The agent is shelved and the
+# current release publishes no agent installer (#59), so the installer no
+# longer offers it; only an explicit -WithAgent runs the agent step.
+$shouldInstall = $WithAgent -and -not $NoAgent
 if ($shouldInstall) {
+    Write-Warn2 ("The fseven agent is shelved and the current release publishes no agent installer. " +
+        "Trying anyway because -WithAgent was passed; this needs FSEVEN_AGENT_MSI_URL and " +
+        "FSEVEN_AGENT_MSI_SHA256 pointing at an agent MSI you already have.")
     # Re-read the freshly-generated ADMIN_API_KEY from .env (important
     # on re-runs where we reused the existing file).
     $envText = Get-Content $EnvFile -Raw

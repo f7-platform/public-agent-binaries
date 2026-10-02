@@ -27,18 +27,23 @@ committed to the tree.
 
 ## Release Shape
 
-- Each release is a GitHub Release on this repository whose assets are the
-  four agent installers with canonical filenames, `release-manifest.json`
-  (the machine-readable index), and copies of `install.sh`, `install.ps1`
-  and `docker-compose.yml`
+- The agent is shelved (2026-09-13), and the README says so; do not add
+  agent download links or commands that point at a release without the file
+- Each controller release is a GitHub Release on this repository whose assets
+  are `release-manifest.json` (the machine-readable index) and copies of
+  `install.sh`, `install.ps1` and `docker-compose.yml`. A controller tag does
+  not produce agent installers: the agent workflow runs on tags in
+  `fseven-agent` and attached its installers only to releases of the
+  same name (the last was v0.2.5-rc3); the current release, v0.3.0, has none
 - The controller image is published to
   `ghcr.io/f7-platform/public-agent-binaries/controller` with a version tag
   and `latest`
 - Supported agent assets are macOS Intel, macOS Apple Silicon, Windows x86_64
   and Linux x86_64; Windows ARM64 uses the Windows x86_64 MSI under emulation
   until a native asset exists
-- SHA-256 checksums are published as `.sha256` sidecars and/or
-  `release-manifest.json` checksum metadata; never edit checksum assets by hand
+- No release has carried `.sha256` sidecars, and the manifest's agent
+  entries carry no checksums; v0.3.0's checksum asset covers its
+  controller-side files only. Never edit checksum assets by hand
 - macOS notarization and Windows Authenticode signing are per-release trust
   signals that depend on configured release credentials; check the release
   notes before claiming they ran for a specific tag

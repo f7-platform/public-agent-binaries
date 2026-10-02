@@ -17,11 +17,13 @@
 #   5. Print the dashboard URL and first-run setup URL.
 #
 # Flags:
-#   --with-agent     Non-interactive: also install the agent on this
-#                    host after bootstrap. Default in interactive
-#                    terminals is to prompt (PR-19). In non-
-#                    interactive shells (piped) the prompt is always
-#                    skipped; pass this flag to opt in.
+#   --with-agent     Also try to install the agent on this host after
+#                    bootstrap. The agent is shelved and the current
+#                    release publishes no agent installer, so the
+#                    installer no longer asks; this flag warns, then
+#                    runs the agent step, which needs
+#                    FSEVEN_AGENT_PKG_URL and FSEVEN_AGENT_PKG_SHA256.
+#   --no-agent       Skip the agent install (the default).
 #   --dir <path>     Install into <path> instead of $PWD/fseven.
 #   --image <ref>    Override controller image (default:
 #                    ghcr.io/f7-platform/public-agent-binaries/controller:latest).
@@ -722,22 +724,13 @@ install_agent() {
        sudo launchctl list | grep ai.fseven"
 }
 
-# Decide whether to run the agent install.
-SHOULD_INSTALL_AGENT=no
-case "$WITH_AGENT" in
-  yes) SHOULD_INSTALL_AGENT=yes ;;
-  no)  SHOULD_INSTALL_AGENT=no  ;;
-  auto)
-    if [[ -t 0 && -t 1 && "$OS_NAME" == "Darwin" ]]; then
-      printf '\nInstall the agent on this machine too? [Y/n] '
-      read -r reply
-      case "${reply:-Y}" in
-        y|Y|yes|YES) SHOULD_INSTALL_AGENT=yes ;;
-        *)           SHOULD_INSTALL_AGENT=no  ;;
-      esac
-    fi
-    ;;
-esac
-if [[ "$SHOULD_INSTALL_AGENT" == "yes" ]]; then
+# Decide whether to run the agent install. The agent is shelved and the
+# current release publishes no agent installer (#59), so the installer no
+# longer offers it; only an explicit --with-agent runs the agent step.
+if [[ "$WITH_AGENT" == "yes" ]]; then
+  warn "The fseven agent is shelved and the current release publishes no agent
+       installer. Trying anyway because --with-agent was passed; this needs
+       FSEVEN_AGENT_PKG_URL and FSEVEN_AGENT_PKG_SHA256 pointing at an agent
+       package you already have."
   install_agent
 fi

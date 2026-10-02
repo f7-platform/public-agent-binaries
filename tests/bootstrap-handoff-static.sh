@@ -549,30 +549,51 @@ if [[ "$(grep -c '^    Write-ScrubGuidance \$SecretsPath$' "$ROOT_DIR/install.ps
   exit 1
 fi
 
+# #59: the agent is shelved and the Latest release (v0.3.0) has no agent
+# installer and no release has ever carried a `.sha256` sidecar, so the README
+# says the agent is shelved and carries no agent download through
+# releases/latest, no sidecar fetch, and no claim that sidecars are published.
+# The installers no longer offer the agent; only an explicit opt-in runs it.
 assert_contains \
   "$ROOT_DIR/README.md" \
-  'curl -fsSLO "$release_base/$asset.sha256"' \
-  'manual macOS/Linux checksum sidecar download'
-assert_contains \
+  'The fseven agent is shelved.' \
+  '#59: README says the agent is shelved'
+assert_not_contains \
   "$ROOT_DIR/README.md" \
-  'pkgutil --check-signature "$asset"' \
-  'manual macOS package signature verification'
-assert_contains \
+  'releases/latest/download"' \
+  '#59: README download base through the Latest release'
+assert_not_contains \
   "$ROOT_DIR/README.md" \
-  'Get-FileHash $msi -Algorithm SHA256' \
-  'manual Windows checksum verification'
-assert_contains \
+  'releases/latest/download/fseven-agent' \
+  '#59: README agent download through the Latest release'
+assert_not_contains \
   "$ROOT_DIR/README.md" \
-  'Get-AuthenticodeSignature $msi' \
-  'manual Windows Authenticode verification'
-assert_contains \
+  '$asset.sha256' \
+  '#59: README fetch of a .sha256 sidecar no release carries'
+assert_not_contains \
   "$ROOT_DIR/README.md" \
-  'if ($signature.Status -ne '\''Valid'\'') { throw "No valid Authenticode signature for $msi" }' \
-  'manual Windows Authenticode fail-closed check'
-assert_contains \
+  'checksums in `.sha256` sidecar' \
+  '#59: README claim that releases publish .sha256 sidecars'
+assert_not_contains \
   "$ROOT_DIR/README.md" \
-  'sha256sum "$asset"' \
-  'manual Linux checksum verification'
+  'Agent installers (4)' \
+  '#59: README claim that every release tag produces four agent installers'
+assert_not_contains \
+  "$ROOT_DIR/install.sh" \
+  'Install the agent on this machine too?' \
+  '#59: install.sh offering the shelved agent'
+assert_not_contains \
+  "$ROOT_DIR/install.ps1" \
+  'Install the agent on this machine too?' \
+  '#59: install.ps1 offering the shelved agent'
+assert_contains \
+  "$ROOT_DIR/install.sh" \
+  'The fseven agent is shelved' \
+  '#59: install.sh --with-agent warns that the agent is shelved'
+assert_contains \
+  "$ROOT_DIR/install.ps1" \
+  'The fseven agent is shelved' \
+  '#59: install.ps1 -WithAgent warns that the agent is shelved'
 assert_contains \
   "$ROOT_DIR/CHANGELOG.md" \
   'Release trust is per tag' \
@@ -604,8 +625,8 @@ assert_contains \
   'copilot instructions current manifest release flow'
 assert_contains \
   "$ROOT_DIR/.github/copilot-instructions.md" \
-  '.sha256' \
-  'copilot instructions current checksum flow'
+  'no release has carried `.sha256` sidecars' \
+  'copilot instructions current checksum flow (#59)'
 assert_contains \
   "$ROOT_DIR/.github/copilot-instructions.md" \
   'Windows ARM64 uses the Windows' \
