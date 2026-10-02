@@ -76,7 +76,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
   say that releases carry `.sha256` sidecars or that every tag produces four
   agent installers. `install.sh` and `install.ps1` no longer ask whether to
   install the agent; `--with-agent` / `-WithAgent` still runs the agent step
-  after a warning that the agent is shelved. (Closes #59)
+  after a warning that the agent is shelved. (#60, Closes #59)
 
 ### Fixed
 
