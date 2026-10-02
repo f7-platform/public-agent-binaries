@@ -1,7 +1,14 @@
 # fseven — Install & Binaries
 
-Public distribution point for fseven: install scripts, Docker Compose file,
-controller container image index, and agent binaries for all supported platforms.
+Public distribution point for fseven: install scripts, Docker Compose file
+and controller container image index.
+
+> **The fseven agent is shelved.** The current release publishes no agent
+> installer, and the agent download instructions that used to be on this page
+> have been removed. Agent files attached to older releases are kept as a
+> record only and are no longer maintained. The sections below that describe
+> enrolling agents explain how the agent worked; they are not instructions you
+> can follow with the current release.
 
 Source code for the controller and agent is hosted in private repositories;
 this repo is the single public surface users interact with.
@@ -66,23 +73,12 @@ Keep this page open for the next step.
 
 ### Step 3 — Install an agent on the same or another machine
 
-Download the right file from the
-[latest release](https://github.com/f7-platform/public-agent-binaries/releases/latest):
+> **Shelved.** The agent is shelved and the current release has no agent
+> installer, so this step cannot be completed with it. The description below
+> is kept so that the pairing page on the dashboard is explained.
 
-| Platform | File |
-|---|---|
-| macOS Apple Silicon | `fseven-agent-aarch64-apple.pkg` |
-| macOS Intel         | `fseven-agent-x86_64-apple.pkg` |
-| Windows x86_64      | `fseven-agent-x86_64-windows.msi` |
-| Linux x86_64        | `fseven-agent-x86_64-linux.tar.gz` |
-
-> **Windows ARM64:** A native ARM64 build for Windows on Arm is not yet
-> available. The x86_64 MSI runs under x86_64 emulation on Windows 11 ARM64
-> machines; native performance and full compatibility are not guaranteed.
-
-Install it normally — double-click the PKG/MSI, or `tar xzf` + run the
-included script on Linux. On first launch the agent opens a local browser tab
-where you paste:
+When an agent installer was published, it was installed normally and on first
+launch opened a local browser tab where you pasted:
 
 - **Controller URL** — `http://localhost:8080` if you're on the same machine
   as the controller, otherwise the LAN URL (e.g. `http://192.168.1.5:8080`).
@@ -98,18 +94,20 @@ The device appears in the dashboard under **Devices** within a few seconds.
 Repeat Step 3 for every endpoint you want to enroll. The pairing code keeps
 rotating in the background; any valid, unexpired code works.
 
-> **Release trust:** macOS PKGs are submitted to Apple's notarization service
-> when the release pipeline has signing credentials configured (see the
-> `fseven-agent` release workflow for current status). Windows MSI artifacts
-> include Authenticode signatures when release signing credentials are active.
-> Published release assets include SHA-256 checksums in `.sha256` sidecar
-> files and are verified by the install scripts before use. Check the release
-> notes for the specific tag you are installing to confirm which signing and
-> notarization steps ran for that release.
+> **Release trust:** No release has published `.sha256` sidecar files, and
+> the agent entries in `release-manifest.json` carry no checksums. A release
+> that has a `SHA256SUMS` asset lists the SHA-256 checksum of each file that
+> asset covers; in v0.3.0 those are the controller-side files. Check the asset
+> list and the release notes for the specific tag you are using to confirm
+> which checksums, signing and notarization steps it has.
 
 ---
 
 ## 2. Install agents against an existing controller
+
+> **Shelved.** The agent is shelved and the current release has no agent
+> installer. This section describes how enrollment against an existing
+> controller worked.
 
 If someone on your team has already stood up a controller and given you a
 URL, skip §1. You only need:
@@ -121,13 +119,10 @@ URL, skip §1. You only need:
 
 ### Interactive pairing (6-digit code)
 
-1. Download the agent binary from the
-   [latest release](https://github.com/f7-platform/public-agent-binaries/releases/latest)
-   (same table as §1).
-2. Install it normally.
-3. On first launch the agent opens a local browser tab — paste the controller
+1. Install the agent. No agent installer is currently published.
+2. On first launch the agent opens a local browser tab — paste the controller
    URL and the 6-digit code.
-4. The device appears in the controller dashboard under **Devices**.
+3. The device appears in the controller dashboard under **Devices**.
 
 This is the right path when you're installing one or two agents yourself.
 For rolling out to dozens or hundreds of machines, use §3.
@@ -148,83 +143,15 @@ into your MDM config immediately.
 
 ### Step 2 — Pre-seed the token at install time
 
-Replace `YOUR_TOKEN_HERE` with the token you minted and
-`https://your-controller.example.com` with your controller's public URL.
+> **Shelved.** The agent is shelved and the current release has no agent
+> installer, so the silent-install scripts that used to be here have been
+> removed: each one downloaded a file that the current release does not have.
 
-#### macOS
-
-```bash
-release_base="https://github.com/f7-platform/public-agent-binaries/releases/latest/download"
-asset="fseven-agent-aarch64-apple.pkg"
-
-curl -fsSLO "$release_base/$asset"
-curl -fsSLO "$release_base/$asset.sha256"
-expected="$(awk '{print $1}' "$asset.sha256")"
-actual="$(shasum -a 256 "$asset" | awk '{print $1}')"
-test "$expected" = "$actual"
-pkgutil --check-signature "$asset"
-
-sudo mkdir -p /etc/fseven
-sudo tee /etc/fseven/enrollment-seed.toml >/dev/null <<EOF
-enrollment_token = "YOUR_TOKEN_HERE"
-controller_url   = "https://your-controller.example.com"
-EOF
-sudo chmod 0600 /etc/fseven/enrollment-seed.toml
-
-sudo installer -pkg "$asset" -target /
-```
-
-#### Windows (MSI transform / Intune / SCCM)
-
-```powershell
-$base = 'https://github.com/f7-platform/public-agent-binaries/releases/latest/download'
-$msi = "$env:TEMP\fseven-agent.msi"
-$sha = "$msi.sha256"
-Invoke-WebRequest -UseBasicParsing `
-  -Uri  "$base/fseven-agent-x86_64-windows.msi" `
-  -OutFile $msi
-Invoke-WebRequest -UseBasicParsing `
-  -Uri  "$base/fseven-agent-x86_64-windows.msi.sha256" `
-  -OutFile $sha
-
-$expected = ((Get-Content $sha -Raw).Trim() -split '\s+')[0].ToLowerInvariant()
-$actual = (Get-FileHash $msi -Algorithm SHA256).Hash.ToLowerInvariant()
-if ($actual -ne $expected) { throw "SHA-256 mismatch for $msi" }
-
-$signature = Get-AuthenticodeSignature $msi
-if ($signature.Status -ne 'Valid') { throw "No valid Authenticode signature for $msi" }
-Write-Host "Authenticode signature valid: $($signature.SignerCertificate.Subject)"
-
-Start-Process msiexec.exe -Wait -ArgumentList @(
-  '/i', $msi, '/quiet', '/norestart',
-  'ENROLLMENT_TOKEN=YOUR_TOKEN_HERE',
-  'CONTROLLER_URL=https://your-controller.example.com'
-)
-```
-
-#### Linux
-
-```bash
-release_base="https://github.com/f7-platform/public-agent-binaries/releases/latest/download"
-asset="fseven-agent-x86_64-linux.tar.gz"
-
-curl -fsSLO "$release_base/$asset"
-curl -fsSLO "$release_base/$asset.sha256"
-expected="$(awk '{print $1}' "$asset.sha256")"
-actual="$(sha256sum "$asset" | awk '{print $1}')"
-test "$expected" = "$actual"
-tar -xzf "$asset"
-cd fseven-agent-v*
-
-sudo mkdir -p /etc/fseven
-sudo cp config/agent-config.toml /etc/fseven/
-# edit /etc/fseven/agent-config.toml:
-#   enrollment_token    = "YOUR_TOKEN_HERE"
-#   controller.api_url  = "https://your-controller.example.com"
-sudo cp bin/fseven-agent /usr/local/bin/
-sudo cp systemd/fseven-agent.service /etc/systemd/system/
-sudo systemctl enable --now fseven-agent
-```
+When an agent installer was published, the token and controller URL were
+written to `/etc/fseven/enrollment-seed.toml` on macOS, passed as the
+`ENROLLMENT_TOKEN` and `CONTROLLER_URL` properties to `msiexec` on Windows,
+and set in `/etc/fseven/agent-config.toml` on Linux before the agent service
+started.
 
 The dashboard shows per-platform silent-install snippets with your token and
 URL pre-filled under **Admin → Fleet deployment → Download & install**.
@@ -233,9 +160,9 @@ URL pre-filled under **Admin → Fleet deployment → Download & install**.
 
 ## File naming
 
-Agent binary filenames are **stable** (no version suffix) so the
-`releases/latest/download/<file>` URL always resolves to the current release.
-This keeps MDM packages and documentation evergreen.
+Agent installers were attached to releases under stable file names with no
+version suffix. The current release has none of these files, so a
+`releases/latest/download/<file>` link to any of them does not resolve.
 
 | Platform | File |
 |---|---|
@@ -244,13 +171,12 @@ This keeps MDM packages and documentation evergreen.
 | Windows x86_64      | `fseven-agent-x86_64-windows.msi` |
 | Linux x86_64        | `fseven-agent-x86_64-linux.tar.gz` |
 
-> **Windows ARM64:** Not natively supported. The x86_64 MSI runs under
-> emulation on Windows 11 ARM64; native support is planned but not yet
-> available.
-
 ---
 
 ## Platform support boundaries
+
+This table describes the platforms the agent was built for before it was
+shelved. No agent installer is currently published for any of them.
 
 | Platform | Status | Notes |
 |---|---|---|
@@ -265,14 +191,19 @@ This keeps MDM packages and documentation evergreen.
 
 ---
 
-Each release tag (`vX.Y.Z`) produces:
+A controller release tag (`vX.Y.Z`) produces:
 
 | Artifact | Location |
 |---|---|
 | Controller container image | `ghcr.io/f7-platform/public-agent-binaries/controller:{vX.Y.Z, latest}` |
 | `release-manifest.json`    | GitHub Release assets — machine-readable index |
 | `install.sh`, `install.ps1`, `docker-compose.yml` | GitHub Release assets + `main` branch |
-| Agent installers (4)       | GitHub Release assets |
+
+A controller tag does not produce agent installers. Agent installers were
+attached only by the separate agent release workflow, which runs on tags in
+its own repository, and the current release, v0.3.0, has none. The `agent`
+entries in `release-manifest.json` name the file each platform would use and
+carry no checksums.
 
 ### `release-manifest.json` schema
 
@@ -315,7 +246,8 @@ Each release tag (`vX.Y.Z`) produces:
 
 `install.sh` / `install.ps1` fetch this manifest on first run and pin the
 controller image to the matching `vX.Y.Z` tag. They also verify downloaded
-compose and agent installer artifacts before use. Override via
+compose and agent installer artifacts before use, and refuse an artifact for
+which no checksum is available. Override via
 `FSEVEN_RELEASE_MANIFEST_URL`; custom compose or agent package URLs must be
 paired with `FSEVEN_COMPOSE_SHA256`, `FSEVEN_AGENT_PKG_SHA256`, or
 `FSEVEN_AGENT_MSI_SHA256` unless a `.sha256` sidecar is published next to the
@@ -325,20 +257,20 @@ artifact.
 
 ## How releases are produced
 
-Releases in this repo are **fully automated** and produced by two
-private-repo workflows:
+Releases in this repo are produced by two private-repo workflows, each
+triggered by a tag pushed to its own repository:
 
 1. **`fseven-controller`** (`.github/workflows/release.yml`) — triggered by
-   pushing a `vX.Y.Z` tag. Builds the controller image, pushes to
+   pushing a `vX.Y.Z` tag to `fseven-controller`. Builds the controller image, pushes to
    `ghcr.io/f7-platform/public-agent-binaries/controller`, publishes
    `release-manifest.json` + install scripts, and syncs `install.sh` /
    `install.ps1` / `docker-compose.yml` to the `main` branch of this repo.
-2. **`fseven-agent`** (`.github/workflows/release.yml`) — triggered by the
-   same tag. Builds PKG / MSI / tarball for each platform, renames to
-   canonical filenames, and uploads to the same release.
-
-Both workflows idempotently target the same GitHub Release, so order does
-not matter.
+2. **`fseven-agent`** (`.github/workflows/release.yml`) — triggered by
+   pushing a tag to `fseven-agent`, not by the controller tag. It built
+   PKG / MSI / tarball for each platform and uploaded them to the release of
+   the same name here. The agent is shelved; the last release here that the
+   agent workflow published to is v0.2.5-rc3, and `fseven-agent` has no
+   v0.3.0 tag.
 
 ---
 
@@ -349,8 +281,8 @@ not matter.
 | `--dir <path>` / `-InstallDir <path>` | `./fseven` | Install directory (holds `.env`, `docker-compose.yml`) |
 | `--image <ref>` / `-Image <ref>` | `ghcr.io/f7-platform/public-agent-binaries/controller:latest` | Override controller image |
 | `--port <n>` / `-Port <n>` | `8080` | Host port |
-| `--with-agent` / `-WithAgent` | prompt | Also install the agent on this host (non-interactive opt-in) |
-| `--no-agent` / `-NoAgent` | — | Skip the agent-install prompt |
+| `--with-agent` / `-WithAgent` | off | Try to install the agent on this host. The agent is shelved and the current release has no agent installer, so this prints a warning, and the download then fails and is skipped unless you supply an agent file and its checksum (`FSEVEN_AGENT_PKG_URL` + `FSEVEN_AGENT_PKG_SHA256` on macOS, `FSEVEN_AGENT_MSI_URL` + `FSEVEN_AGENT_MSI_SHA256` on Windows) |
+| `--no-agent` / `-NoAgent` | — | Skip the agent install; this is now the default, because the installers no longer ask |
 
 ---
 
