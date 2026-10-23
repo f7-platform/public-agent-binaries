@@ -14,12 +14,18 @@ name: Audit Evidence Gate
 #                       puts back status:triage, so the issue always carries
 #                       exactly one status (fseven-platform#195).
 # 2. issue_comment   — when the audit-verifier agent posts a verdict=APPROVED
-#                       comment, remove status:needs-reaudit and close the issue.
-#                       verdict=REJECTED takes no automated action.
+#                       comment on an open issue, record it and leave the issue
+#                       open: the fix's pull request closes it at merge with its
+#                       Closes #N line, and enforce-close accepts that close on
+#                       the verdict (Ian, 2026-10-23). An open issue that
+#                       carries status:needs-reaudit (this gate reopened it after
+#                       an unevidenced close) is closed, because the verdict
+#                       supplies the missing evidence. On an already-closed issue
+#                       the verdict strips status:needs-reaudit and changes no
+#                       state. verdict=REJECTED takes no automated action.
 #
-# Implements the execution evidence rule from
-# .github/agents/issue-executor.agent.md and the verifier handoff defined
-# in .github/agents/audit-verifier.agent.md.
+# Implements the execution evidence rule from .claude/agents/issue-executor.md
+# and the verifier handoff defined in .claude/agents/audit-verifier.md.
 
 on:
   issues:
@@ -286,11 +292,32 @@ jobs:
               `(association=${association}, allowlisted=${trustedByAllowlist}).`
             );
 
+            // The verifier is a pre-merge gate, so an APPROVED verdict on an open
+            // issue usually lands while the fix's pull request is unmerged.
+            // Closing here closed fseven-atlas-mvp#4118 47 minutes before its fix
+            // merged. The verdict is recorded and the merge's Closes #N line
+            // closes the issue; enforce-close accepts that close on this verdict.
+            // Only an issue this gate reopened (status:needs-reaudit) is closed
+            // here, because the verdict supplies the evidence its close lacked.
+            const reaudit = labels.includes('status:needs-reaudit');
+            const wasOpen = issue.state !== 'closed';
+            const verifier = context.payload.sender?.login || 'audit-verifier';
+            if (wasOpen && !reaudit) {
+              core.info(`Issue #${issue.number} is open without status:needs-reaudit; verifier APPROVED recorded, the merge of the fix closes it.`);
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issue.number,
+                body: `## ✅ Audit Evidence Gate — APPROVED recorded\n\n\`audit-verifier\` APPROVED verdict from @${verifier} clears the gate. This issue stays open until the fix's pull request merges and closes it with its \`Closes #${issue.number}\` line; that close is accepted on this verdict. The session or lane that opened the pull request arms the merge now.`,
+              });
+              return;
+            }
+
             // The reopen replaced the issue's status with status:needs-reaudit
             // (fseven-platform#195), so stripping the marker puts back
             // status:triage when no other status label remains: labels.json makes
             // the status dimension exactly_one.
-            if (labels.includes('status:needs-reaudit')) {
+            if (reaudit) {
               let stripped = true;
               try {
                 await github.rest.issues.removeLabel({
@@ -317,7 +344,6 @@ jobs:
               }
             }
 
-            const wasOpen = issue.state !== 'closed';
             if (wasOpen) {
               await github.rest.issues.update({
                 owner: context.repo.owner,
@@ -326,7 +352,6 @@ jobs:
                 state: 'closed',
                 state_reason: 'completed',
               });
-              const verifier = context.payload.sender?.login || 'audit-verifier';
               await github.rest.issues.createComment({
                 owner: context.repo.owner,
                 repo: context.repo.repo,
