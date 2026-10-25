@@ -915,6 +915,32 @@ assert_not_contains \
   'SHA256SUMS' \
   'stale CLAUDE.md SHA256SUMS flow'
 
+# PAB9, PAB10, PAB13: the documents say what the installers and the repository
+# do. The installer prints the admin email, where the password is stored and the
+# reveal command, never the password itself; the credentials file stays until the
+# first successful admin login, with no 24-hour removal; there is no PR template;
+# and the installers enroll an agent only on an explicit opt-in.
+assert_not_contains \
+  "$ROOT_DIR/README.md" \
+  'prints the one-time admin email + password' \
+  'PAB9: README claim that the installer prints the password'
+assert_contains \
+  "$ROOT_DIR/README.md" \
+  "docker compose exec controller sh -lc 'grep ^FSEVEN_BOOTSTRAP_ADMIN_PASSWORD= /app/model-storage/bootstrap/secrets.env | cut -d= -f2-'" \
+  'PAB9: README reveal command the installer prints'
+assert_not_contains \
+  "$ROOT_DIR/README.md" \
+  'after 24 hours' \
+  'PAB10: README claim that an unused secrets.env is removed after 24 hours'
+assert_not_contains \
+  "$ROOT_DIR/CONTRIBUTING.md" \
+  'fill in the PR template' \
+  'PAB13: CONTRIBUTING step citing a PR template the repository does not have'
+assert_not_contains \
+  "$ROOT_DIR/CLAUDE.md" \
+  'enroll the local agent' \
+  'PAB13: CLAUDE.md claim that the installers enroll the local agent'
+
 if command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; then
   rendered_compose="$(mktemp)"
   trap 'rm -f "$rendered_compose"' EXIT
@@ -1763,8 +1789,8 @@ printf 'PAB19: install.sh hands the admin key to curl on standard input, not on 
 # no operator knows to delete.
 #
 # Kill it there for real: fault-inject a failure into the SECOND chmod of .env,
-# which install.sh performs after the `cp` and before the `rm`/`mv` (install.sh
-# :396). The exit must be non-zero AND no .env.pb4.bak may survive.
+# which install.sh performs after the `cp` and before the `rm`/`mv` (the second
+# `chmod 600` in install.sh's backup block). The exit must be non-zero AND no .env.pb4.bak may survive.
 sh_crash="$scenario_root/sh-crash"
 sh_out4="$scenario_root/sh-out-4.txt"
 crash_trace="$scenario_root/sh-crash-trace.txt"
@@ -2220,7 +2246,7 @@ PY
   # it says nothing about a file that is appended to LATER. Add-SecretLines was
   # AppendAllText-then-Protect-FilePath, i.e. write-then-restrict — safe only by the
   # assumption "the .env is already restricted". That assumption is FALSE on the
-  # upgrade path: install.ps1 :372/:389 append a freshly minted
+  # upgrade path: install.ps1's Add-SecretLines backfills append a freshly minted
   # CREDENTIAL_ENCRYPTION_KEY / FSEVEN_APP_DB_PASSWORD to a `.env` written by an
   # OLDER installer — one created before the PB5 fix, at the install directory's
   # inherited ACL / ambient umask. The new secret therefore landed in a
@@ -2275,7 +2301,7 @@ OLDENV
   if [[ "$ps_upgrade_first" -gt "$ps_upgrade_size" ]]; then
     printf 'PB5: install.ps1 restricted the pre-existing .env only AFTER appending to it (%s bytes at first restriction, %s bytes before the append).\n' \
       "$ps_upgrade_first" "$ps_upgrade_size" >&2
-    printf '     The upgrade path (install.ps1 :372 CREDENTIAL_ENCRYPTION_KEY, :389 FSEVEN_APP_DB_PASSWORD) appends a freshly minted\n' >&2
+    printf '     The upgrade path (install.ps1'"'"'s Add-SecretLines backfills of CREDENTIAL_ENCRYPTION_KEY and FSEVEN_APP_DB_PASSWORD) appends a freshly minted\n' >&2
     printf '     secret to a .env an OLDER installer created world-readable, and tightens it afterwards. That is write-then-restrict — PB5.\n' >&2
     printf '     Restrict in Add-SecretLines BEFORE the AppendAllText.\n' >&2
     exit 1
@@ -2290,7 +2316,7 @@ OLDENV
 
   # ── PB4 (install.ps1): the ROLLBACK branch actually EXECUTES ────────────────
   # `Move-Item -Path $backup -Destination $EnvFile -Force` was only ever grep-asserted
-  # (tests/bootstrap-handoff-static.sh :390): no scenario made the render check fail,
+  # (by this script's static PB4 rollback check): no scenario made the render check fail,
   # so the Windows rollback never ran in any test. Force it.
   ps_rollback="$scenario_root/ps-rollback"
   ps_out_rb="$scenario_root/ps-out-rollback.txt"

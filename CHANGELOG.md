@@ -137,6 +137,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 
 ### Fixed
 
+- **(Audit Run 43, PAB9 / PAB10 / PAB13 / PAB14) The documents say what the
+  installers and the repository do.** The README said the installer prints the
+  admin email and password; it prints the email, where the one-time password is
+  stored and the command that reveals it, and the README now says so and gives
+  that command. The README also said an unused `secrets.env` is removed after 24
+  hours; the controller deletes it after the first successful admin login and
+  until then it stays on disk in cleartext, so the README now says to delete it
+  as the installer does. CONTRIBUTING.md no longer asks for a pull request
+  template the repository does not have, and CLAUDE.md no longer says the
+  installers enroll the local agent or calls the README a download guide.
+  Comments and failure text in `install.ps1` and the tests that cited line
+  numbers which had moved now name what they point at (the `Add-SecretLines`
+  backfills, install.sh's `pb4_backup_clean` trap block, the second
+  `chmod 600`). `tests/bootstrap-handoff-static.sh` guards each corrected
+  sentence.
+
 - **(Audit Run 42, PAB2) `docker-compose.yml`: the controller service no longer
   declares a `build:` stanza.** It pointed at a container recipe that exists
   nowhere in this repository's tree — this repo ships installers and

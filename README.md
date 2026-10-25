@@ -52,13 +52,21 @@ irm https://raw.githubusercontent.com/f7-platform/public-agent-binaries/main/ins
 ```
 
 The installer brings up PostgreSQL + the controller in Docker Compose, then
-prints the one-time admin email + password. First run takes about 30 seconds.
+prints the admin email, where the one-time password is stored and the command
+that reveals it. First run takes about 30 seconds.
 
-The password is also written inside the controller container at
-`/app/model-storage/bootstrap/secrets.env` for the installer handoff. The
-controller deletes that file after the first successful admin login; if nobody
-logs in, it is treated as stale and removed on a later startup after 24 hours.
-Save the printed credentials immediately and rotate the password after login.
+The password is written in cleartext inside the controller container at
+`/app/model-storage/bootstrap/secrets.env` for the installer handoff. Reveal it
+only when you are ready to log in:
+
+```bash
+docker compose exec controller sh -lc 'grep ^FSEVEN_BOOTSTRAP_ADMIN_PASSWORD= /app/model-storage/bootstrap/secrets.env | cut -d= -f2-'
+```
+
+The controller deletes that file after the first successful admin login; until
+then it stays on disk in cleartext. After you log in, rotate the password and
+delete the file as the installer says:
+`docker compose exec controller rm -f /app/model-storage/bootstrap/secrets.env`.
 
 **Requirements:** Docker Desktop (macOS / Windows) or Docker Engine (Linux)
 with Compose v2; loopback port `8080` free.

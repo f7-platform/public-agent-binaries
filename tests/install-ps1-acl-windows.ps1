@@ -282,7 +282,7 @@ if ($firstUpg -gt $legacySize) {
     Fail @"
 install.ps1 restricted the pre-existing .env only AFTER appending to it ($firstUpg bytes at
 the first Set-Acl; $legacySize bytes before the append). The upgrade path (install.ps1
-Add-SecretLines, called at :372 CREDENTIAL_ENCRYPTION_KEY and :389 FSEVEN_APP_DB_PASSWORD)
+Add-SecretLines, in the backfills of CREDENTIAL_ENCRYPTION_KEY and FSEVEN_APP_DB_PASSWORD)
 appended a freshly minted secret to a .env that an OLDER installer left readable by other
 local users, and tightened it only afterwards. That is write-then-restrict — PB5, on the
 upgrade path. Restrict in Add-SecretLines BEFORE the AppendAllText.

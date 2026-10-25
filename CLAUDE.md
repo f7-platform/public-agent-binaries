@@ -13,13 +13,17 @@ directories; release binaries are GitHub Release assets and are never
 committed to the tree.
 
 - `install.sh`, `install.ps1` — Bootstrap installers (macOS/Linux and Windows)
-  that start the community controller stack and enroll the local agent
+  that start the community controller stack; the agent is shelved, so they
+  try to install and enroll one only when passed `--with-agent` (`-WithAgent`)
+  with an agent package the operator already has
 - `docker-compose.yml`, `.env.example` — The community controller Compose
   profile and its environment template
 - `.gitignore` — Keeps `.env`, the installers' temporary secret copies and the
   default `fseven/` install directory out of the tree; an install run from inside
   a clone writes live secrets there
-- `README.md` — Download, checksum-verification and installation guide for IT admins
+- `README.md` — Installation guide for the community controller, with the
+  agent's shelved status, the checksum note and a record of how agent
+  enrollment worked
 - `CHANGELOG.md`, `CONTRIBUTING.md`, `SECURITY.md`, `LICENSE` — Release
   history and public repository policy
 - `tests/` — Static contract checks for the installers, the Compose file and
