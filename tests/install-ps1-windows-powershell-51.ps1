@@ -270,9 +270,28 @@ function Invoke-Installer {
 # on stderr and exit 1. Under 5.1 with the Stop preference that line is the
 # question PAB6 asks. Run both ways a Windows operator reaches the script: the
 # README's `irm | iex` and a downloaded copy run from disk.
+function Describe-Stop([hashtable]$Run) {
+    # Name the cause the stub log shows, so a red run says what happened rather
+    # than blaming one suspect for every non-zero exit. The first probe run of
+    # this job did exactly that: install.ps1 never parsed under 5.1 (no BOM), no
+    # docker command ran, and the verdict still named the PAB6 stderr.
+    $calls = @(($Run.Calls -split "`r?`n") | Where-Object { $_.Trim() -ne '' })
+    if ($calls.Count -eq 0) {
+        return "install.ps1 never called docker: it did not parse, or stopped before the preflight (read the stderr above; a ParserError there is the encoding defect, not PAB6)"
+    }
+    $last = $calls[-1].Trim()
+    if ($last -match '^volume inspect ') {
+        return "install.ps1 stopped right after '$last', the stale-volume probe at which the stub wrote 'Error: No such volume' to stderr: that is PAB6, the redirected native stderr becoming a terminating error under Windows PowerShell 5.1"
+    }
+    if ($last -match '^compose exec ') {
+        return "install.ps1 stopped right after '$last', a bootstrap poll at which the stub wrote to stderr: PAB6 on the bootstrap-wait redirect"
+    }
+    return "install.ps1 stopped after its last docker call, '$last' (read the stderr above)"
+}
+
 function Assert-FreshInstall([hashtable]$Run, [string]$How) {
     if ($Run.ExitCode -ne 0) {
-        Fail "a fresh install.ps1 ($How) exited $($Run.ExitCode) under Windows PowerShell 5.1 against a docker whose only unusual act was writing 'Error: No such volume' to stderr at the stale-volume probe (PAB6). See the output above for where it stopped."
+        Fail "a fresh install.ps1 ($How) exited $($Run.ExitCode) under Windows PowerShell 5.1. $(Describe-Stop $Run)"
     }
     if ($Run.Output -notmatch 'admin@example\.test') {
         Fail "a fresh install.ps1 ($How) exited 0 but never printed the bootstrap admin email; it did not reach the credentials step"
@@ -300,6 +319,24 @@ $freshIex = Invoke-Installer -Name 'fresh-iex' -ViaIex
 $freshFile = Invoke-Installer -Name 'fresh-file'
 Assert-FreshInstall $freshIex 'irm | iex path'
 Assert-FreshInstall $freshFile 'run from disk'
+
+# A fresh install whose bootstrap never completes: every poll of the secrets
+# file makes docker write "service controller is not running" to stderr, as the
+# real CLI does while the controller is still starting. The scenario above never
+# reaches that branch (the stub answers the first poll), so without this one the
+# bootstrap-wait redirect would be unguarded on 5.1. The installer must reach
+# its timeout branch and exit 0.
+$freshTimeout = Invoke-Installer -Name 'fresh-timeout' -EnvOverrides @{ FSEVEN_TEST_BOOTSTRAP_READY = 'no'; FSEVEN_BOOTSTRAP_TIMEOUT_SECS = '2' }
+if ($freshTimeout.ExitCode -ne 0) {
+    Fail "a fresh install.ps1 whose bootstrap polls all fail exited $($freshTimeout.ExitCode) under Windows PowerShell 5.1. $(Describe-Stop $freshTimeout)"
+}
+if ($freshTimeout.Output -notmatch 'Bootstrap did not complete within 2 s') {
+    Fail "a fresh install.ps1 whose bootstrap polls all fail did not reach the bootstrap-timeout branch"
+}
+if (@(($freshTimeout.Calls -split "`r?`n") | Where-Object { $_ -match '^compose exec -T controller cat ' }).Count -lt 1) {
+    Fail "the bootstrap-timeout scenario never polled the secrets file, so it exercised nothing"
+}
+Pass "PAB6: a fresh install.ps1 reaches its bootstrap-timeout branch under Windows PowerShell 5.1 while every poll makes docker write to stderr"
 
 # ── Scenario 2: docker FAILS at info, pull, up (PAB5) ───────────────────────
 # A native command's non-zero exit raises no exception, so the try/catch that
