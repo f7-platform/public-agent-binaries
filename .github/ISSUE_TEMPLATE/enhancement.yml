@@ -7,7 +7,7 @@ body:
   - type: markdown
     attributes:
       value: |
-        Every issue carries exactly one `type:`, `priority:`, `complexity:`, `scope:` and `status:` label. This form sets type and status; pick priority, complexity and code owner below and the label gate applies them. Rules: `fseven-platform/.claude/ISSUE-LABELS.md`.
+        Every issue carries exactly one `type:`, `priority:`, `complexity:`, `scope:` and `status:` label. This form sets type and status; pick priority, complexity and code owner below and the label gate applies them. Rules: `fseven-platform/.claude/ISSUE-LABELS.md`, in a private F7 repository that outside filers cannot open; the Priority, Complexity and Code owner dropdowns are all the form needs.
   - type: textarea
     id: summary
     attributes:
@@ -68,15 +68,6 @@ body:
       description: The repository where the change lands. Cross-repo work is split into one issue per repo.
       options:
         - "public-agent-binaries — this repository"
-        - "fseven-agent"
-        - "fseven-atlas-mvp"
-        - "fseven-backbone"
-        - "fseven-controller"
-        - "fseven-docs"
-        - "fseven-identity-providers"
-        - "fseven-platform"
-        - "fseven-relay"
-        - "fseven-schemas"
         - "public-atlas-binaries"
         - "public-docs"
       default: 0
