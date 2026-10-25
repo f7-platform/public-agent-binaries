@@ -133,3 +133,18 @@ jobs:
 
       - name: Published controller image >= compose floor (#29)
         run: bash tests/controller-image-parity.sh
+
+  # PAB8 / PAB15 (Audit Run 43): the installers deploy the compose the release
+  # manifest names (a GitHub Release asset), not this tree's file, and every job
+  # above reads the tree. This job fetches the live manifest, downloads the compose
+  # it names, verifies its SHA-256 and runs the security-relevant assertions over
+  # it, naming each known divergence from the tree and failing on any other. It
+  # runs on the weekly schedule too, like the image parity job, because the asset
+  # can change with a release that opens no pull request here.
+  published-compose-contract:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Manifest-named compose passes the security contract (PAB8)
+        run: bash tests/published-compose-contract.sh

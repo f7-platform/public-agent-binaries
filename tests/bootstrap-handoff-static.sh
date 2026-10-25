@@ -275,10 +275,50 @@ assert_contains \
   "$ROOT_DIR/docker-compose.yml" \
   '${POSTGRES_BIND:-127.0.0.1}:${POSTGRES_PORT:-5432}:5432' \
   'INF9: POSTGRES_PORT host-port override (controller parity)'
+# PAB15 (Run 43): the header used to claim the file is "resynced verbatim" from
+# the controller's compose, while PAB2's fix deliberately diverges it (no build
+# stanza) and PAB7 now does too (loopback controller bind). The header must say
+# the file deliberately differs and that a sync must keep those differences.
 assert_contains \
   "$ROOT_DIR/docker-compose.yml" \
-  'published mirror of fseven-controller/docker-compose.yml' \
-  'INF9: compose declares itself a synced mirror of the source of truth'
+  'derived from fseven-controller/docker-compose.yml and deliberately' \
+  'PAB15: compose header says it deliberately differs from the controller source'
+assert_not_contains \
+  "$ROOT_DIR/docker-compose.yml" \
+  'resynced verbatim' \
+  'PAB15: compose header no longer claims a verbatim resync'
+assert_not_contains \
+  "$ROOT_DIR/README.md" \
+  'syncs `install.sh` /' \
+  'PAB15: README no longer claims the release workflow syncs the compose to main verbatim'
+assert_contains \
+  "$ROOT_DIR/README.md" \
+  'deliberately' \
+  'PAB15: README says the compose deliberately differs from the controller'"'"'s'
+
+# PAB7 (Run 43): the controller port is published on loopback by default, like
+# every other service, through CONTROLLER_BIND; README documents the opt-in and
+# its plain-HTTP warning, and the LAN-URL sentences say the opt-in is needed.
+assert_contains \
+  "$ROOT_DIR/docker-compose.yml" \
+  '"${CONTROLLER_BIND:-127.0.0.1}:${PORT:-8080}:8080"' \
+  'PAB7: controller port published on loopback by default (CONTROLLER_BIND opt-in)'
+assert_not_contains \
+  "$ROOT_DIR/docker-compose.yml" \
+  '- "${PORT:-8080}:8080"' \
+  'PAB7: controller port no longer published on every interface'
+assert_contains \
+  "$ROOT_DIR/README.md" \
+  'CONTROLLER_BIND=0.0.0.0' \
+  'PAB7: README documents the CONTROLLER_BIND opt-in'
+assert_contains \
+  "$ROOT_DIR/README.md" \
+  'plain HTTP on every interface' \
+  'PAB7: README warns what the opt-in exposes'
+if [[ "$(grep -c 'CONTROLLER_BIND=0.0.0.0' "$ROOT_DIR/README.md")" -lt 3 ]]; then
+  printf 'PAB7: README must say the opt-in is needed at the install step and at both LAN-URL mentions\n' >&2
+  exit 1
+fi
 
 # INF5 (Run 34) / PB9 (Run 36): the OpenFGA playground exposes the authorization-
 # model editing UI and must never ship enabled in the prod profile. The controller
@@ -926,6 +966,20 @@ if command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; 
     "$rendered_compose" \
     'published: "5432"' \
     'rendered compose default POSTGRES_PORT host mapping'
+  # PAB7: the `host_ip: 127.0.0.1` assertion above matches ANY service's mapping,
+  # so it cannot see the controller's. Cut the controller service out of the
+  # rendered YAML and require its mapping to carry the loopback host address.
+  rendered_controller="$(awk '/^  controller:/{f=1; print; next} f && /^  [a-z]/{exit} f' "$rendered_compose")"
+  if ! printf '%s\n' "$rendered_controller" | grep -q 'host_ip: 127.0.0.1'; then
+    printf 'PAB7: the rendered controller port mapping has no host_ip 127.0.0.1 (published on every interface):\n%s\n' \
+      "$(printf '%s\n' "$rendered_controller" | grep -A4 'ports:')" >&2
+    exit 1
+  fi
+  if ! printf '%s\n' "$rendered_controller" | grep -q 'published: "8080"'; then
+    printf 'PAB7: the rendered controller port mapping does not publish 8080\n' >&2
+    exit 1
+  fi
+  printf 'PAB7: rendered controller mapping is 127.0.0.1:8080 by default (verified)\n'
 
   # INF5 / PB9: render the `prod` profile (which includes the openfga service) and
   # assert the OpenFGA playground resolves to OFF by default. The community profile

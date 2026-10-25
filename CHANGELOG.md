@@ -40,6 +40,26 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
     instead of as a header argument visible in the process list.
   - `SEC14`: a root `.gitignore` keeps `.env`, the installers' temporary secret
     copies and the default `fseven/` install directory out of this public tree.
+  - `PAB7`: the controller port is published on loopback by default,
+    `"${CONTROLLER_BIND:-127.0.0.1}:${PORT:-8080}:8080"`, like Postgres, OpenFGA,
+    Redis and Adminer already were; the dashboard, the first-run login and the
+    admin API were reachable over plain HTTP on every interface while the README
+    said everything ran on localhost. `CONTROLLER_BIND=0.0.0.0` is the documented
+    opt-in, with the warning that it needs a TLS proxy in front. Because the
+    installers deploy the compose the release manifest names (today the v0.3.0
+    asset), this reaches no new install until a release carries it.
+  - `PAB8`: a new `static-checks` job, `published-compose-contract`, fetches the
+    live release manifest, downloads the compose it names, verifies the SHA-256
+    and runs the gate's security-relevant assertions over it on every pull
+    request, on `main` and weekly. Known divergences from the tree (the `build:`
+    stanza, the missing contract key, the staged wording, the controller bind)
+    are named in its output rather than failing; any other divergence, a fetch
+    failure or a checksum mismatch fails. Whether the asset or the tree is the
+    canonical compose is recorded on #62 as an open question for the controller
+    release owner; the installers keep fetching what the manifest names.
+  - `PAB15`: the compose header and the README no longer say the file is
+    resynced verbatim from the controller's compose; it deliberately differs
+    (no `build:` stanza, loopback controller bind) and a sync must keep that.
   - The gate's docker stub writes to stderr where the real CLI does and can fail
     `info`, `pull` or `up`; new scenarios drive both installers through the flag
     re-runs, the three failures, the pull-log paths and the admin-key handoff.
