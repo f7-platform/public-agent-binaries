@@ -63,13 +63,23 @@ Save the printed credentials immediately and rotate the password after login.
 **Requirements:** Docker Desktop (macOS / Windows) or Docker Engine (Linux)
 with Compose v2; loopback port `8080` free.
 
-The controller is published on `127.0.0.1` only, like the other services in the
-Compose file. To reach it from another machine, set `CONTROLLER_BIND=0.0.0.0` in
-the install directory's `.env` and run `docker compose --profile community up -d`
-again. **Warning:** that publishes the dashboard, the first-run login and the
-admin API over plain HTTP on every interface of the host; only do it behind a
-reverse proxy that terminates TLS, and keep the port closed at the firewall
-otherwise.
+With this repository's Compose file the controller is published on `127.0.0.1`
+only, like the other services. To reach it from another machine, set
+`CONTROLLER_BIND=0.0.0.0` in the install directory's `.env` and run
+`docker compose --profile community up -d` again. **Warning:** that publishes
+the dashboard, the first-run login and the admin API over
+plain HTTP on every interface of the host; only do it behind a reverse proxy
+that terminates TLS, and keep the port closed at the firewall otherwise.
+
+**Installs from the current release do not have this yet.** The install commands
+above deploy the Compose file the release manifest names, and the current
+release's (v0.3.0) copy still publishes the controller on every interface and
+ignores `CONTROLLER_BIND`, so until a release carries this repository's Compose
+file a fresh install is reachable from the LAN over plain HTTP. Stopgap until
+then: keep port `8080` closed at the host firewall, or edit the controller's
+port line in the installed `docker-compose.yml` to
+`"127.0.0.1:${PORT:-8080}:8080"` and run `docker compose --profile community up -d`
+again.
 
 ### Step 2 — Log in + open the pairing page
 
