@@ -8,6 +8,43 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 
 ### Security
 
+- **(Audit Run 43, PAB4 / PAB5 / PAB6 / PAB7 / PAB8 / PAB15 / PAB17 / PAB19 /
+  SEC14) The public installer does what its README says.**
+  - `PAB6`, confirmed HIGH by a new `windows-latest` job that runs `install.ps1`
+    under Windows PowerShell 5.1 (the shell README.md advertises) against a stub
+    docker: every fresh install aborted at the stale-volume probe with a
+    `NativeCommandError`, because 5.1 turns a redirected native stderr line into
+    a terminating error under the Stop preference and the real docker writes
+    "Error: No such volume" there; and a copy run from disk did not parse at all,
+    because the file had no UTF-8 byte-order mark and 5.1 read its em dashes as
+    curly quotes. Every docker call now goes through one helper that relaxes the
+    preference for that call, captures stderr and returns the exit code, and the
+    file carries the byte-order mark. The 5.1 job stays as the guard.
+  - `PAB5`: `install.ps1` reads the exit status of `docker compose version`,
+    `docker info`, `pull` and `up -d` (a native command's non-zero exit raised
+    no exception, so its try/catch never fired) and prints "is running" only
+    after `up` succeeded.
+  - `PAB4`: on a re-run over an existing `.env`, `--port` / `-Port` and
+    `--image` / `-Image` now win: the matching `.env` line is rewritten through a
+    0600 copy that is cleaned on every exit path, the old and new values are
+    logged, and Compose, the printed URL and the token-mint URL agree. The flag
+    is recorded as given rather than compared against the default, so
+    `--port 8080` over 9090 moves it back. Without the flag `.env` is kept, so a
+    re-run never changes the port or the image on its own, and the installers no
+    longer announce a manifest-resolved image a re-run does not use.
+  - `PAB17`: `install.sh` writes the pull output to a 0600 `mktemp` file instead
+    of the fixed `/tmp` name, removes it on success and on the recognised
+    failure, and names it only on the unrecognised one.
+  - `PAB19`: on the opt-in macOS agent path the admin API key reaches `curl` as
+    a config line on standard input (`-K -`, written by the `printf` builtin)
+    instead of as a header argument visible in the process list.
+  - `SEC14`: a root `.gitignore` keeps `.env`, the installers' temporary secret
+    copies and the default `fseven/` install directory out of this public tree.
+  - The gate's docker stub writes to stderr where the real CLI does and can fail
+    `info`, `pull` or `up`; new scenarios drive both installers through the flag
+    re-runs, the three failures, the pull-log paths and the admin-key handoff.
+  (#65, Closes #62)
+
 - **(Audit Run 42, PAB1) `install.ps1`: `$tokenHash` is quote-doubled into the
   enrollment-poll SQL literal**, as `PB27` did for `install.sh` and as
   `$hostName` already was. The hash is parsed out of the controller's mint

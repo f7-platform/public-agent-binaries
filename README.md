@@ -284,6 +284,14 @@ triggered by a tag pushed to its own repository:
 | `--with-agent` / `-WithAgent` | off | Try to install the agent on this host. The agent is shelved and the current release has no agent installer, so this prints a warning, and the download then fails and is skipped unless you supply an agent file and its checksum (`FSEVEN_AGENT_PKG_URL` + `FSEVEN_AGENT_PKG_SHA256` on macOS, `FSEVEN_AGENT_MSI_URL` + `FSEVEN_AGENT_MSI_SHA256` on Windows) |
 | `--no-agent` / `-NoAgent` | — | Skip the agent install; this is now the default, because the installers no longer ask |
 
+On a re-run over an existing install directory, a flag given on the command line
+replaces the matching line in `.env` (`--port` / `-Port` rewrites `PORT`,
+`--image` / `-Image` rewrites `CONTROLLER_IMAGE`) and the installer logs the old
+and new values, so Compose, the printed dashboard URL and the enrollment-token URL
+agree. Without the flag the installer keeps what `.env` says: a re-run never moves
+the port or changes the controller image on its own, and the only way to upgrade
+the controller is to re-run with `--image` / `-Image` naming the new reference.
+
 ---
 
 ## Issues & support

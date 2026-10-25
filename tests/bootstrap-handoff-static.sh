@@ -139,7 +139,7 @@ assert_contains \
   'canonical PowerShell bootstrap secrets path'
 assert_contains \
   "$ROOT_DIR/install.ps1" \
-  'docker compose exec -T controller cat $SecretsPath' \
+  "Invoke-Docker @('compose', 'exec', '-T', 'controller', 'cat', \$SecretsPath)" \
   'PowerShell container secrets read'
 assert_contains \
   "$ROOT_DIR/install.ps1" \
@@ -640,6 +640,121 @@ assert_not_contains \
   'SHA256SUMS' \
   'stale copilot instructions SHA256SUMS flow'
 
+# ── Audit Run 43 (#62): PAB4, PAB5, PAB6, PAB17, PAB19, SEC14 ─────────────────
+# Structural guards; the behavioural proofs are in the scenarios further down.
+
+# PAB4: a --port / --image (-Port / -Image) given on a re-run must win over .env.
+# The old test compared the flag against the DEFAULT, which cannot tell
+# `--port 8080` from no flag, and `source .env` exported .env's PORT into every
+# later `docker compose` call, so the printed URL and the bound port disagreed.
+assert_contains "$ROOT_DIR/install.sh" 'IMAGE_GIVEN=yes' \
+  'PAB4: install.sh records that --image was given'
+assert_contains "$ROOT_DIR/install.sh" 'PORT_GIVEN=yes' \
+  'PAB4: install.sh records that --port was given'
+assert_contains "$ROOT_DIR/install.sh" 'env_set_line PORT "$CONTROLLER_PORT" --port' \
+  'PAB4: install.sh rewrites the PORT line of .env when --port is given'
+assert_contains "$ROOT_DIR/install.sh" 'env_set_line CONTROLLER_IMAGE "$CONTROLLER_IMAGE" --image' \
+  'PAB4: install.sh rewrites the CONTROLLER_IMAGE line of .env when --image is given'
+assert_contains "$ROOT_DIR/install.sh" 'export PORT="$CONTROLLER_PORT"' \
+  'PAB4: install.sh hands Compose the port it prints'
+assert_not_contains "$ROOT_DIR/install.sh" \
+  '[[ "$CONTROLLER_PORT" == "$CONTROLLER_PORT_DEFAULT" && -n "${PORT:-}" ]]' \
+  'PAB4: install.sh no longer infers "no --port" from the default value'
+assert_contains "$ROOT_DIR/install.ps1" "\$PSBoundParameters.ContainsKey('Image')" \
+  'PAB4: install.ps1 records that -Image was given'
+assert_contains "$ROOT_DIR/install.ps1" "\$PSBoundParameters.ContainsKey('Port')" \
+  'PAB4: install.ps1 records that -Port was given'
+assert_contains "$ROOT_DIR/install.ps1" "Update-EnvLineFromFlag -EnvFile \$EnvFile -Key 'PORT'" \
+  'PAB4: install.ps1 rewrites the PORT line of .env when -Port is given'
+assert_contains "$ROOT_DIR/install.ps1" "Update-EnvLineFromFlag -EnvFile \$EnvFile -Key 'CONTROLLER_IMAGE'" \
+  'PAB4: install.ps1 rewrites the CONTROLLER_IMAGE line of .env when -Image is given'
+assert_not_contains "$ROOT_DIR/install.ps1" '$Port = [int]$Matches[1]' \
+  'PAB4: install.ps1 no longer overwrites -Port from .env unconditionally'
+assert_contains "$ROOT_DIR/README.md" 'a re-run never moves' \
+  'PAB4: README says what the flags do on a re-run'
+
+# PAB5 / PAB6: every docker call in install.ps1 goes through Invoke-Docker, which
+# reads the exit code (a native command's non-zero exit raises no exception, so
+# the try/catch that used to wrap the preflight never caught anything) and keeps
+# a redirected stderr from becoming a terminating error under Windows PowerShell
+# 5.1 (the real docker writes "Error: No such volume" to stderr on every fresh
+# install at the stale-volume probe, which aborted the install on 5.1).
+assert_contains "$ROOT_DIR/install.ps1" 'function Invoke-Docker' \
+  'PAB5/PAB6: install.ps1 has one native-docker helper'
+assert_contains "$ROOT_DIR/install.ps1" 'if ($pull.ExitCode -ne 0) {' \
+  'PAB5: install.ps1 checks the exit status of docker compose pull'
+assert_contains "$ROOT_DIR/install.ps1" 'if ($up.ExitCode -ne 0) {' \
+  'PAB5: install.ps1 checks the exit status of docker compose up'
+assert_not_contains "$ROOT_DIR/install.ps1" 'try { docker compose version | Out-Null }' \
+  'PAB5: install.ps1 no longer relies on try/catch around a native command'
+pab6_redirects="$(grep -nF '2>$null' "$ROOT_DIR/install.ps1" | grep -vE '^[0-9]+:[[:space:]]*#' || true)"
+if [[ -n "$pab6_redirects" ]]; then
+  printf 'PAB6: install.ps1 still redirects native stderr with 2>$null (a terminating error under Windows PowerShell 5.1):\n%s\n' "$pab6_redirects" >&2
+  exit 1
+fi
+pab5_direct="$(grep -nE '^[[:space:]]*(\$[A-Za-z]+ *= *\(?)?docker (compose|info|volume) ' "$ROOT_DIR/install.ps1" || true)"
+if [[ -n "$pab5_direct" ]]; then
+  printf 'PAB5/PAB6: install.ps1 calls docker directly instead of through Invoke-Docker:\n%s\n' "$pab5_direct" >&2
+  exit 1
+fi
+if [[ "$(grep -c '& docker @Arguments 2>&1' "$ROOT_DIR/install.ps1")" -ne 1 ]]; then
+  printf 'PAB5/PAB6: Invoke-Docker must be the one place install.ps1 invokes docker\n' >&2
+  exit 1
+fi
+# PAB6, second defect found by the probe: Windows PowerShell 5.1 reads a file with
+# no byte-order mark as the ANSI code page, and the em dash / check-mark bytes then
+# decode to curly quotes that end strings early, so a BOM-less install.ps1 does not
+# parse at all when run from disk. The file must start with the UTF-8 BOM.
+if [[ "$(head -c 3 "$ROOT_DIR/install.ps1" | od -An -tx1 | tr -d ' \n')" != "efbbbf" ]]; then
+  printf 'PAB6: install.ps1 must start with the UTF-8 byte-order mark (EF BB BF) or Windows PowerShell 5.1 cannot parse it\n' >&2
+  exit 1
+fi
+assert_contains "$ROOT_DIR/.github/workflows/static-checks.yml" 'install-ps1-windows-powershell-51:' \
+  'PAB6: CI has the Windows PowerShell 5.1 job'
+assert_contains "$ROOT_DIR/.github/workflows/static-checks.yml" 'shell: powershell' \
+  'PAB6: the 5.1 job runs on the Windows PowerShell engine, not pwsh'
+
+# PAB17: the pull log is a mktemp file, never a fixed name in the shared /tmp.
+assert_not_contains "$ROOT_DIR/install.sh" '/tmp/fseven-pull.log' \
+  'PAB17: install.sh no longer writes the pull log to a fixed shared path'
+assert_contains "$ROOT_DIR/install.sh" 'PULL_LOG="$(mktemp "${TMPDIR:-/tmp}/fseven-pull.XXXXXX")"' \
+  'PAB17: install.sh creates the pull log with mktemp'
+assert_contains "$ROOT_DIR/install.sh" 'the pull output is kept at $PULL_LOG' \
+  'PAB17: the unrecognised-failure message names the mktemp path'
+
+# PAB19: the admin API key never appears in a process argument vector. It reaches
+# curl as a config line on standard input (-K -), written by printf (a builtin).
+assert_not_contains "$ROOT_DIR/install.sh" '-H "X-Admin-Key' \
+  'PAB19: install.sh passes no X-Admin-Key header on the curl command line'
+assert_contains "$ROOT_DIR/install.sh" 'curl -fsSL -X POST -K -' \
+  'PAB19: install.sh feeds curl its config from standard input'
+assert_contains "$ROOT_DIR/install.sh" "printf 'header = \"X-Admin-Key: %s\"\\n' \"\$ADMIN_API_KEY\"" \
+  'PAB19: the admin key is written to curl by the printf builtin'
+
+# SEC14: the tree ignores the secrets .env the installers and .env.example create
+# inside a clone of this public repository, and the default fseven/ install dir.
+assert_contains "$ROOT_DIR/.gitignore" '!.env.example' \
+  'SEC14: .gitignore keeps the committed template tracked'
+assert_contains "$ROOT_DIR/.gitignore" 'fseven/' \
+  'SEC14: .gitignore covers the default install directory'
+assert_contains "$ROOT_DIR/CLAUDE.md" '`.gitignore`' \
+  'SEC14: CLAUDE.md Structure lists .gitignore'
+if command -v git >/dev/null 2>&1 && git -C "$ROOT_DIR" rev-parse --git-dir >/dev/null 2>&1; then
+  for ignored in .env fseven/.env .env.pb4.bak fseven/.env.pab4.tmp; do
+    if ! git -C "$ROOT_DIR" check-ignore -q -- "$ignored"; then
+      printf 'SEC14: %s is not ignored; an install run inside a clone would stage live secrets\n' "$ignored" >&2
+      exit 1
+    fi
+  done
+  if git -C "$ROOT_DIR" check-ignore -q -- .env.example; then
+    printf 'SEC14: .env.example must stay tracked (it is the committed template)\n' >&2
+    exit 1
+  fi
+  printf 'SEC14: .env, fseven/.env and the installers'"'"' secret copies are ignored; .env.example is not (verified)\n'
+else
+  printf 'SEC14: git unavailable or not a checkout; skipped check-ignore\n'
+fi
+
 # PB27: every operator-supplied or response-derived value that lands inside a
 # SQL string literal in install.sh is quote-doubled the same way. $host_name
 # already was; $token_hash (parsed out of the controller's mint response) was
@@ -990,11 +1105,13 @@ assert_no_backup_left() {
   # PEM on a re-run. It exists only as a rollback for the compose-render check and
   # MUST NOT survive the installer, or every secret sits in a second file that no
   # operator knows to delete.
-  local dir="$1" label="$2"
-  if [[ -e "$dir/.env.pb4.bak" ]]; then
-    printf 'PB5 [%s]: left .env.pb4.bak behind — a full plaintext copy of every secret in .env\n' "$label" >&2
-    exit 1
-  fi
+  local dir="$1" label="$2" copy
+  for copy in .env.pb4.bak .env.pab4.tmp; do
+    if [[ -e "$dir/$copy" ]]; then
+      printf 'PB5 [%s]: left %s behind — a full plaintext copy of every secret in .env\n' "$label" "$copy" >&2
+      exit 1
+    fi
+  done
 }
 
 make_docker_stub() {
@@ -1019,13 +1136,40 @@ make_docker_stub() {
   #   * FSEVEN_TEST_CONFIG_HANG   — announce, then block, INSIDE the .env.pb4.bak
   #                                window, so a scenario can deliver a real signal
   #                                while the plaintext secret copy is on disk.
+  #   * FSEVEN_TEST_DOCKER_FAIL   — info | pull | pull-unknown | up: that call fails
+  #                                the way the real CLI does (a stderr line, exit 1),
+  #                                so the installers' exit-status handling (PAB5)
+  #                                and install.sh's pull-failure classification
+  #                                (PAB17) actually execute.
+  #   * FSEVEN_TEST_ENV_DUMP      — a path: `compose up` dumps its environment there,
+  #                                so a scenario can read the PORT and
+  #                                CONTROLLER_IMAGE Compose would actually have used
+  #                                (PAB4).
+  #
+  # PAB6 (Run 43): the stub writes to stderr where the real CLI does. Its `volume`
+  # answer used to exit 1 silently; the real `docker volume inspect` of a missing
+  # volume prints "Error: No such volume" to stderr, and under Windows PowerShell
+  # 5.1 that line was a terminating error that aborted every fresh install.
   local stub="$1/docker"
   cat > "$stub" <<'STUB'
 #!/usr/bin/env bash
 set -u
 if [[ -n "${FSEVEN_DOCKER_LOG:-}" ]]; then printf '%s\n' "$*" >> "$FSEVEN_DOCKER_LOG"; fi
-[[ "${1:-}" == "info" ]]   && exit 0
-[[ "${1:-}" == "volume" ]] && exit 1   # never report a stale volume
+if [[ "${1:-}" == "info" ]]; then
+  if [[ "${FSEVEN_TEST_DOCKER_FAIL:-}" == "info" ]]; then
+    echo 'error during connect: this error may indicate that the docker daemon is not running' >&2
+    exit 1
+  fi
+  echo 'Server Version: 0.0.0-stub'
+  exit 0
+fi
+if [[ "${1:-}" == "volume" ]]; then
+  # A fresh install probes a volume that does not exist: "[]" on stdout, an
+  # Error line on stderr, exit 1, exactly as the real CLI answers.
+  echo '[]'
+  echo "Error: No such volume: ${3:-}" >&2
+  exit 1
+fi
 [[ "${1:-}" != "compose" ]] && exit 0
 shift
 sub=""
@@ -1061,13 +1205,28 @@ case "$sub" in
       cat .env 2>/dev/null || true
     fi
     ;;
-  pull|up) exit 0 ;;
+  pull)
+    case "${FSEVEN_TEST_DOCKER_FAIL:-}" in
+      pull)         echo 'Error response from daemon: manifest unknown' >&2; exit 1 ;;
+      pull-unknown) echo 'stub: the registry closed the connection' >&2; exit 1 ;;
+    esac
+    echo ' controller Pulled'
+    ;;
+  up)
+    if [[ -n "${FSEVEN_TEST_ENV_DUMP:-}" ]]; then env > "$FSEVEN_TEST_ENV_DUMP"; fi
+    if [[ "${FSEVEN_TEST_DOCKER_FAIL:-}" == "up" ]]; then
+      echo 'Error response from daemon: stub refused to start the controller' >&2
+      exit 1
+    fi
+    echo ' Container fseven-controller Started'
+    ;;
   exec)
     if [[ "${FSEVEN_TEST_BOOTSTRAP_READY:-no}" == "yes" ]]; then
       printf 'FSEVEN_BOOTSTRAP_ADMIN_EMAIL=admin@example.test\n'
       printf 'FSEVEN_BOOTSTRAP_ADMIN_PASSWORD=stub-one-time-password\n'
       exit 0
     fi
+    echo 'service "controller" is not running' >&2
     exit 1
     ;;
   logs)
@@ -1210,12 +1369,19 @@ COMPOSE_SHA256="$(
 # The installers must not reach the network in these scenarios: point the release
 # manifest at a nonexistent file:// URL (both fetchers fail closed to "no
 # manifest") and serve the compose file from the local checkout over file://.
+# Arguments after the fifth are passed to the installer (e.g. --port 9090). The
+# installer's mktemp files (PAB17's pull log) land in a scenario-private TMPDIR so
+# a scenario can assert what was left behind.
+sh_tmpdir="$scenario_root/sh-tmp"
+mkdir -p "$sh_tmpdir"
 run_install_sh() {
   local dir="$1" ready="$2" healthcheck="$3" timeout="$4" out="$5"
+  shift 5
   (
     umask 000   # hostile ambient umask: PB5's window is only closed if the
                 # installer sets its own restrictive creation mode.
     PATH="$stub_bin:$PATH" \
+    TMPDIR="$sh_tmpdir" \
     FSEVEN_REAL_DOCKER="$REAL_DOCKER" \
     FSEVEN_TEST_BOOTSTRAP_READY="$ready" \
     FSEVEN_TEST_HEALTHCHECK="$healthcheck" \
@@ -1223,8 +1389,23 @@ run_install_sh() {
     FSEVEN_RELEASE_MANIFEST_URL="file:///nonexistent-fseven-release-manifest.json" \
     FSEVEN_COMPOSE_URL="file://$ROOT_DIR/docker-compose.yml" \
     FSEVEN_COMPOSE_SHA256="$COMPOSE_SHA256" \
-      bash "$ROOT_DIR/install.sh" --dir "$dir" --no-agent
+      bash "$ROOT_DIR/install.sh" --dir "$dir" --no-agent "$@"
   ) > "$out" 2>&1
+}
+
+env_line() {
+  # The value of KEY in an .env file (first match), for before/after comparisons.
+  sed -n "s/^$2=//p" "$1" | head -1
+}
+
+snapshot_secrets() {
+  # Every single-line secret in an .env plus the JWT key's fingerprint, one per
+  # line, so a scenario can prove a rewrite touched nothing but the line it meant to.
+  local env="$1" key
+  for key in POSTGRES_PASSWORD FSEVEN_APP_DB_PASSWORD ADMIN_API_KEY CREDENTIAL_ENCRYPTION_KEY; do
+    printf '%s=%s\n' "$key" "$(env_line "$env" "$key")"
+  done
+  printf 'JWT=%s\n' "$(first_pem_body_line "$env")"
 }
 
 # ── Scenario 1: fresh install, bootstrap completes (the happy path) ──────────
@@ -1328,6 +1509,195 @@ fi
 assert_no_backup_left "$sh_fresh" 'install.sh (re-run)'
 printf 'PB3: install.sh emits scrub guidance on all three branches (verified)\n'
 printf 'PB4: install.sh preserves the existing JWT key on re-run (verified)\n'
+
+# PAB6 (Run 43): the stub's `volume` answer now writes "Error: No such volume"
+# to stderr, as the real CLI does on every fresh install. Scenario 1 above is a
+# fresh install that reached the credentials step past that probe.
+printf 'PAB6: install.sh completes a fresh install when docker writes to stderr at the stale-volume probe (verified)\n'
+
+# PAB17: the happy path and the re-run left no pull log behind. The installer's
+# mktemp lands in the scenario-private TMPDIR, so anything there is a leftover.
+if ls "$sh_tmpdir"/fseven-pull.* >/dev/null 2>&1; then
+  printf 'PAB17: install.sh left a pull log behind on a successful pull:\n' >&2
+  ls -l "$sh_tmpdir" >&2
+  exit 1
+fi
+
+# ── PAB4: flags WIN over .env on a re-run, and what Compose gets is what is printed ──
+# Before: `--port 9090 --image example/override:1` over an existing .env printed
+# "running at http://localhost:9090" while `docker compose up` received PORT=8080
+# (exported by `source .env`) and the original image; `--port 8080` could not be
+# told from no flag; and nothing exercised either flag.
+pab4_before="$(snapshot_secrets "$sh_fresh/.env")"
+sh_out_pab4="$scenario_root/sh-out-pab4.txt"
+pab4_dump="$scenario_root/sh-pab4-up.env"
+FSEVEN_TEST_ENV_DUMP="$pab4_dump" \
+  run_install_sh "$sh_fresh" no yes 5 "$sh_out_pab4" --port 9090 --image example/override:1
+assert_output_contains "$sh_out_pab4" 'Existing .env PORT=8080 replaced by PORT=9090 (--port given on the command line)' \
+  'PAB4: install.sh logs the old and new PORT'
+assert_output_contains "$sh_out_pab4" 'replaced by CONTROLLER_IMAGE=example/override:1 (--image given on the command line)' \
+  'PAB4: install.sh logs the old and new CONTROLLER_IMAGE'
+assert_output_contains "$sh_out_pab4" 'running at http://localhost:9090' \
+  'PAB4: install.sh prints the port --port asked for'
+assert_pab4_agrees() {
+  # The printed URL, the environment `docker compose up` ran with, and .env must
+  # all carry the same PORT and CONTROLLER_IMAGE.
+  local env="$1" dump="$2" out="$3" port="$4" image="$5" label="$6"
+  if [[ "$(env_line "$env" PORT)" != "$port" ]]; then
+    printf 'PAB4 [%s]: .env PORT is %s, expected %s\n' "$label" "$(env_line "$env" PORT)" "$port" >&2; exit 1
+  fi
+  if [[ "$(env_line "$env" CONTROLLER_IMAGE)" != "$image" ]]; then
+    printf 'PAB4 [%s]: .env CONTROLLER_IMAGE is %s, expected %s\n' "$label" "$(env_line "$env" CONTROLLER_IMAGE)" "$image" >&2; exit 1
+  fi
+  if ! grep -qx "PORT=$port" "$dump"; then
+    printf 'PAB4 [%s]: docker compose up ran with PORT=%s, not %s (the printed URL and the bound port disagree)\n' \
+      "$label" "$(grep '^PORT=' "$dump" || echo '<unset>')" "$port" >&2; exit 1
+  fi
+  if ! grep -qx "CONTROLLER_IMAGE=$image" "$dump"; then
+    printf 'PAB4 [%s]: docker compose up ran with %s, not CONTROLLER_IMAGE=%s\n' \
+      "$label" "$(grep '^CONTROLLER_IMAGE=' "$dump" || echo '<unset>')" "$image" >&2; exit 1
+  fi
+  if ! grep -q "running at http://localhost:$port" "$out"; then
+    printf 'PAB4 [%s]: the printed URL does not carry port %s\n' "$label" "$port" >&2; exit 1
+  fi
+}
+assert_pab4_agrees "$sh_fresh/.env" "$pab4_dump" "$sh_out_pab4" 9090 'example/override:1' 'install.sh --port --image'
+# The rewrite is a copy of every secret: nothing but the two lines may change,
+# the mode stays 0600, and no copy survives.
+if [[ "$(snapshot_secrets "$sh_fresh/.env")" != "$pab4_before" ]]; then
+  printf 'PAB4: the .env rewrite changed a secret or the JWT key; only PORT and CONTROLLER_IMAGE may change\n' >&2
+  exit 1
+fi
+if [[ "$(file_mode "$sh_fresh/.env")" != "600" ]]; then
+  printf 'PAB4: .env is mode %s after the rewrite (expected 600)\n' "$(file_mode "$sh_fresh/.env")" >&2
+  exit 1
+fi
+assert_no_backup_left "$sh_fresh" 'install.sh (--port/--image rewrite)'
+# A flagless re-run keeps what .env says (9090, the override image): a re-run
+# never moves the port or changes the image on its own.
+sh_out_pab4b="$scenario_root/sh-out-pab4b.txt"
+pab4_dump_b="$scenario_root/sh-pab4b-up.env"
+FSEVEN_TEST_ENV_DUMP="$pab4_dump_b" run_install_sh "$sh_fresh" no yes 5 "$sh_out_pab4b"
+assert_pab4_agrees "$sh_fresh/.env" "$pab4_dump_b" "$sh_out_pab4b" 9090 'example/override:1' 'install.sh flagless re-run'
+assert_not_contains "$sh_out_pab4b" 'replaced by' 'PAB4: a flagless re-run rewrote .env'
+# `--port 8080` over 9090 moves it back: the DEFAULT value, given, still wins.
+sh_out_pab4c="$scenario_root/sh-out-pab4c.txt"
+pab4_dump_c="$scenario_root/sh-pab4c-up.env"
+FSEVEN_TEST_ENV_DUMP="$pab4_dump_c" run_install_sh "$sh_fresh" no yes 5 "$sh_out_pab4c" --port 8080
+assert_output_contains "$sh_out_pab4c" 'Existing .env PORT=9090 replaced by PORT=8080' \
+  'PAB4: --port 8080 over 9090 is honoured (the default value, given, still wins)'
+assert_pab4_agrees "$sh_fresh/.env" "$pab4_dump_c" "$sh_out_pab4c" 8080 'example/override:1' 'install.sh --port 8080'
+assert_no_backup_left "$sh_fresh" 'install.sh (--port 8080)'
+printf 'PAB4: install.sh --port/--image win over .env on a re-run; URL, Compose and .env agree; flagless keeps .env (verified)\n'
+
+# ── PAB5 / PAB17: docker FAILS at info, pull, up ────────────────────────────
+# install.sh dies at each point; prove it never prints "is running" and never
+# reaches the next docker step, and that the pull log is handled on each branch.
+run_fail_scenario_sh() {
+  local fail="$1" next="$2"
+  local dir="$scenario_root/sh-fail-$fail" out="$scenario_root/sh-out-fail-$fail.txt"
+  local dockerlog="$scenario_root/sh-fail-$fail.docker.log" rc
+  : > "$dockerlog"
+  set +e
+  FSEVEN_TEST_DOCKER_FAIL="$fail" FSEVEN_DOCKER_LOG="$dockerlog" \
+    run_install_sh "$dir" yes no 2 "$out"
+  rc=$?
+  set -e
+  if [[ "$rc" -eq 0 ]]; then
+    printf 'PAB5 [%s]: install.sh exited 0 although docker %s failed\n' "$fail" "$fail" >&2
+    cat "$out" >&2; exit 1
+  fi
+  if grep -q 'is running at' "$out"; then
+    printf 'PAB5 [%s]: install.sh printed "is running" although docker %s failed\n' "$fail" "$fail" >&2
+    cat "$out" >&2; exit 1
+  fi
+  if grep -Eq "$next" "$dockerlog"; then
+    printf 'PAB5 [%s]: install.sh went on to the next docker step after %s failed:\n' "$fail" "$fail" >&2
+    cat "$dockerlog" >&2; exit 1
+  fi
+  printf 'PAB5: install.sh exits %s, never says "is running" and stops at the failed %s (verified)\n' "$rc" "$fail"
+}
+run_fail_scenario_sh info '(^| )(pull|up)( |$)'
+run_fail_scenario_sh pull '(^| )up( |$)'
+run_fail_scenario_sh up '(^| )exec( |$)'
+# PAB17: the recognised pull failure (registry says "manifest unknown") prints
+# the PD2 guidance and removes the log; the unrecognised one names the mktemp
+# path and keeps the file there, and nothing else is left in TMPDIR.
+assert_output_contains "$scenario_root/sh-out-fail-pull.txt" 'There is no local-build fallback (PD2)' \
+  'PAB17: the recognised pull failure prints the registry guidance'
+if ls "$sh_tmpdir"/fseven-pull.* >/dev/null 2>&1; then
+  printf 'PAB17: install.sh left a pull log behind on the recognised pull failure\n' >&2
+  ls -l "$sh_tmpdir" >&2; exit 1
+fi
+run_fail_scenario_sh pull-unknown '(^| )up( |$)'
+pab17_kept="$(sed -n 's/.*the pull output is kept at \(.*\)$/\1/p' "$scenario_root/sh-out-fail-pull-unknown.txt" | head -1)"
+if [[ -z "$pab17_kept" ]]; then
+  printf 'PAB17: the unrecognised pull failure did not name the pull log path\n' >&2
+  cat "$scenario_root/sh-out-fail-pull-unknown.txt" >&2; exit 1
+fi
+case "$pab17_kept" in
+  "$sh_tmpdir"/fseven-pull.??????) ;;
+  *) printf 'PAB17: the pull log path %s is not a mktemp file under TMPDIR\n' "$pab17_kept" >&2; exit 1 ;;
+esac
+if [[ ! -f "$pab17_kept" ]] || ! grep -q 'the registry closed the connection' "$pab17_kept"; then
+  printf 'PAB17: the named pull log %s is missing or does not hold the pull output\n' "$pab17_kept" >&2; exit 1
+fi
+if [[ "$(file_mode "$pab17_kept")" != "600" ]]; then
+  printf 'PAB17: the pull log is mode %s (mktemp should create it 0600)\n' "$(file_mode "$pab17_kept")" >&2; exit 1
+fi
+rm -f "$pab17_kept"
+printf 'PAB17: the pull log is a 0600 mktemp file, removed on success and the recognised failure, named on the unrecognised one (verified)\n'
+
+# ── PAB19: the admin key reaches curl on stdin, never in its argument vector ──
+# Drive install_agent on its own (as the PAB1 parity checks extract it) with a
+# curl that records its arguments and its standard input, a docker that answers
+# the org-id query, and the rest of its dependencies stubbed. The function stops
+# at "Could not parse enrollment token" (the stub answers `{}`), which is after
+# the mint request and before anything that needs sudo.
+pab19="$scenario_root/pab19"
+mkdir -p "$pab19/bin"
+cat > "$pab19/bin/curl" <<'STUB'
+#!/usr/bin/env bash
+printf '%s\n' "$@" > "$PAB19_ARGV"
+cat > "$PAB19_STDIN"
+printf '{}'
+STUB
+cat > "$pab19/bin/docker" <<'STUB'
+#!/usr/bin/env bash
+case "$*" in *system_state*) echo org-stub ;; esac
+exit 0
+STUB
+chmod +x "$pab19/bin/curl" "$pab19/bin/docker"
+{
+  printf 'set -uo pipefail\n'
+  printf 'log() { :; }\nwarn() { printf "warn: %%s\\n" "$*" >&2; }\ndie() { printf "die: %%s\\n" "$*" >&2; exit 1; }\n'
+  printf 'manifest_get() { :; }\ndownload_file() { return 1; }\nverify_sha256() { :; }\nverify_macos_pkg_signature() { :; }\nfetch_sidecar_sha256() { :; }\n'
+  printf 'OS_NAME=Darwin\nCONTROLLER_PORT=8080\nADMIN_API_KEY=pab19-test-admin-key-0123456789abcdef\nMANIFEST_JSON=""\n'
+  sh_function_body install_agent
+  printf 'install_agent\n'
+} > "$pab19/harness.sh"
+PATH="$pab19/bin:$PATH" PAB19_ARGV="$pab19/argv.txt" PAB19_STDIN="$pab19/stdin.txt" \
+  bash "$pab19/harness.sh" > "$pab19/out.txt" 2>&1 || true
+if [[ ! -f "$pab19/argv.txt" ]]; then
+  printf 'PAB19: install_agent never reached the curl mint request; the proof would be vacuous\n' >&2
+  cat "$pab19/out.txt" >&2; exit 1
+fi
+if grep -q 'X-Admin-Key' "$pab19/argv.txt"; then
+  printf 'PAB19: the admin key header is in curl'"'"'s argument vector:\n' >&2
+  cat "$pab19/argv.txt" >&2; exit 1
+fi
+if grep -q 'pab19-test-admin-key' "$pab19/argv.txt"; then
+  printf 'PAB19: the admin key value is in curl'"'"'s argument vector\n' >&2; exit 1
+fi
+if ! grep -qx -- '-K' "$pab19/argv.txt" || ! grep -qx -- '-' "$pab19/argv.txt"; then
+  printf 'PAB19: curl was not told to read its config from standard input (-K -)\n' >&2
+  cat "$pab19/argv.txt" >&2; exit 1
+fi
+if ! grep -qx 'header = "X-Admin-Key: pab19-test-admin-key-0123456789abcdef"' "$pab19/stdin.txt"; then
+  printf 'PAB19: the X-Admin-Key config line did not reach curl on standard input:\n' >&2
+  cat "$pab19/stdin.txt" >&2; exit 1
+fi
+printf 'PAB19: install.sh hands the admin key to curl on standard input, not on its command line (verified)\n'
 
 # ── Scenario 4: the installer DIES inside the backup window ─────────────────
 # .env.pb4.bak is a byte-for-byte copy of .env: POSTGRES_PASSWORD,
@@ -1555,6 +1925,7 @@ printf 'PB4: install.sh rolls .env back (mv) and degrades to the controller-gene
 if command -v pwsh >/dev/null 2>&1; then
   run_install_ps1() {
     local dir="$1" ready="$2" healthcheck="$3" timeout="$4" out="$5"
+    shift 5
     mkdir -p "$dir"
     cp "$ROOT_DIR/docker-compose.yml" "$dir/docker-compose.yml"   # skip the fetch
     (
@@ -1565,7 +1936,7 @@ if command -v pwsh >/dev/null 2>&1; then
       FSEVEN_TEST_HEALTHCHECK="$healthcheck" \
       FSEVEN_BOOTSTRAP_TIMEOUT_SECS="$timeout" \
       FSEVEN_RELEASE_MANIFEST_URL="file:///nonexistent-fseven-release-manifest.json" \
-        pwsh -NoProfile -File "$ROOT_DIR/install.ps1" -InstallDir "$dir" -NoAgent
+        pwsh -NoProfile -File "$ROOT_DIR/install.ps1" -InstallDir "$dir" -NoAgent "$@"
     ) > "$out" 2>&1
   }
 
@@ -1643,6 +2014,80 @@ PY
   fi
   assert_no_backup_left "$ps_fresh" 'install.ps1 (re-run)'
   printf 'PB3: install.ps1 emits scrub guidance on all three branches (verified)\n'
+
+  # PAB6: the stub's `volume` answer writes "Error: No such volume" to stderr
+  # (as the real CLI does); the fresh install above got past it. Under pwsh that
+  # never aborted; the engine that did is covered by the windows-latest job
+  # install-ps1-windows-powershell-51, which runs this same scenario on 5.1.
+  printf 'PAB6: install.ps1 completes a fresh install when docker writes to stderr at the stale-volume probe (verified under pwsh)\n'
+
+  # ── PAB4 (install.ps1): -Port / -Image win over .env on a re-run ──────────
+  ps_pab4_before="$(snapshot_secrets "$ps_fresh/.env")"
+  ps_out_pab4="$scenario_root/ps-out-pab4.txt"
+  ps_pab4_dump="$scenario_root/ps-pab4-up.env"
+  FSEVEN_TEST_ENV_DUMP="$ps_pab4_dump" \
+    run_install_ps1 "$ps_fresh" no yes 5 "$ps_out_pab4" -Port 9090 -Image example/override:1
+  assert_output_contains "$ps_out_pab4" 'Existing .env PORT=8080 replaced by PORT=9090 (-Port given on the command line)' \
+    'PAB4: install.ps1 logs the old and new PORT'
+  assert_output_contains "$ps_out_pab4" 'replaced by CONTROLLER_IMAGE=example/override:1 (-Image given on the command line)' \
+    'PAB4: install.ps1 logs the old and new CONTROLLER_IMAGE'
+  assert_pab4_agrees "$ps_fresh/.env" "$ps_pab4_dump" "$ps_out_pab4" 9090 'example/override:1' 'install.ps1 -Port -Image'
+  if [[ "$(snapshot_secrets "$ps_fresh/.env")" != "$ps_pab4_before" ]]; then
+    printf 'PAB4: install.ps1'"'"'s .env rewrite changed a secret or the JWT key; only PORT and CONTROLLER_IMAGE may change\n' >&2
+    exit 1
+  fi
+  if [[ "$(file_mode "$ps_fresh/.env")" != "600" ]]; then
+    printf 'PAB4: install.ps1 left .env at mode %s after the rewrite (expected 600)\n' "$(file_mode "$ps_fresh/.env")" >&2
+    exit 1
+  fi
+  assert_no_backup_left "$ps_fresh" 'install.ps1 (-Port/-Image rewrite)'
+  ps_out_pab4b="$scenario_root/ps-out-pab4b.txt"
+  ps_pab4_dump_b="$scenario_root/ps-pab4b-up.env"
+  FSEVEN_TEST_ENV_DUMP="$ps_pab4_dump_b" run_install_ps1 "$ps_fresh" no yes 5 "$ps_out_pab4b"
+  assert_pab4_agrees "$ps_fresh/.env" "$ps_pab4_dump_b" "$ps_out_pab4b" 9090 'example/override:1' 'install.ps1 flagless re-run'
+  assert_not_contains "$ps_out_pab4b" 'replaced by' 'PAB4: a flagless install.ps1 re-run rewrote .env'
+  ps_out_pab4c="$scenario_root/ps-out-pab4c.txt"
+  ps_pab4_dump_c="$scenario_root/ps-pab4c-up.env"
+  FSEVEN_TEST_ENV_DUMP="$ps_pab4_dump_c" run_install_ps1 "$ps_fresh" no yes 5 "$ps_out_pab4c" -Port 8080
+  assert_output_contains "$ps_out_pab4c" 'Existing .env PORT=9090 replaced by PORT=8080' \
+    'PAB4: -Port 8080 over 9090 is honoured (the default value, given, still wins)'
+  assert_pab4_agrees "$ps_fresh/.env" "$ps_pab4_dump_c" "$ps_out_pab4c" 8080 'example/override:1' 'install.ps1 -Port 8080'
+  assert_no_backup_left "$ps_fresh" 'install.ps1 (-Port 8080)'
+  printf 'PAB4: install.ps1 -Port/-Image win over .env on a re-run; URL, Compose and .env agree; flagless keeps .env (verified)\n'
+
+  # ── PAB5 (install.ps1): docker FAILS at info, pull, up ────────────────────
+  # A native command's non-zero exit raises no exception, so before this fix the
+  # preflight's try/catch never fired, pull and up were unchecked, and "is running"
+  # was printed regardless.
+  run_fail_scenario_ps1() {
+    local fail="$1" next="$2"
+    local dir="$scenario_root/ps-fail-$fail" out="$scenario_root/ps-out-fail-$fail.txt"
+    local dockerlog="$scenario_root/ps-fail-$fail.docker.log" rc
+    : > "$dockerlog"
+    set +e
+    FSEVEN_TEST_DOCKER_FAIL="$fail" FSEVEN_DOCKER_LOG="$dockerlog" \
+      run_install_ps1 "$dir" yes no 2 "$out"
+    rc=$?
+    set -e
+    if [[ "$rc" -eq 0 ]]; then
+      printf 'PAB5 [%s]: install.ps1 exited 0 although docker %s failed\n' "$fail" "$fail" >&2
+      cat "$out" >&2; exit 1
+    fi
+    if grep -q 'is running at' "$out"; then
+      printf 'PAB5 [%s]: install.ps1 printed "is running" although docker %s failed\n' "$fail" "$fail" >&2
+      cat "$out" >&2; exit 1
+    fi
+    if grep -Eq "$next" "$dockerlog"; then
+      printf 'PAB5 [%s]: install.ps1 went on to the next docker step after %s failed:\n' "$fail" "$fail" >&2
+      cat "$dockerlog" >&2; exit 1
+    fi
+    printf 'PAB5: install.ps1 exits %s, never says "is running" and stops at the failed %s (verified)\n' "$rc" "$fail"
+  }
+  run_fail_scenario_ps1 info '(^| )(pull|up)( |$)'
+  run_fail_scenario_ps1 pull '(^| )up( |$)'
+  run_fail_scenario_ps1 up '(^| )exec( |$)'
+  assert_output_contains "$scenario_root/ps-out-fail-pull.txt" 'There is no local-build fallback (PD2)' \
+    'PAB5: install.ps1 prints the registry guidance on a recognised pull failure'
 
   # ── PB5 (install.ps1): CREATION-TIME proof, not final-mode ─────────────────
   # Everything above is final-state. Final state CANNOT distinguish "restricted

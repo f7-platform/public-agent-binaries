@@ -16,6 +16,9 @@ committed to the tree.
   that start the community controller stack and enroll the local agent
 - `docker-compose.yml`, `.env.example` — The community controller Compose
   profile and its environment template
+- `.gitignore` — Keeps `.env`, the installers' temporary secret copies and the
+  default `fseven/` install directory out of the tree; an install run from inside
+  a clone writes live secrets there
 - `README.md` — Download, checksum-verification and installation guide for IT admins
 - `CHANGELOG.md`, `CONTRIBUTING.md`, `SECURITY.md`, `LICENSE` — Release
   history and public repository policy

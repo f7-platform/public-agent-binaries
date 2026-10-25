@@ -1,4 +1,4 @@
-# ─────────────────────────────────────────────────────────────────────────────
+﻿# ─────────────────────────────────────────────────────────────────────────────
 # install.ps1 under WINDOWS POWERSHELL 5.1 (Audit Run 43, PAB5 / PAB6).
 #
 # README.md tells Windows operators to run install.ps1 from "PowerShell 5.1+ or
@@ -300,6 +300,85 @@ $freshIex = Invoke-Installer -Name 'fresh-iex' -ViaIex
 $freshFile = Invoke-Installer -Name 'fresh-file'
 Assert-FreshInstall $freshIex 'irm | iex path'
 Assert-FreshInstall $freshFile 'run from disk'
+
+# ── Scenario 2: docker FAILS at info, pull, up (PAB5) ───────────────────────
+# A native command's non-zero exit raises no exception, so the try/catch that
+# used to wrap the preflight never fired, pull and up were unchecked, and "is
+# running" was printed regardless. On the 5.1 engine specifically.
+function Get-EnvValue([string]$Path, [string]$Key) {
+    $m = Select-String -Path $Path -Pattern "^$Key=(.*)$" | Select-Object -First 1
+    if ($m) { return $m.Matches[0].Groups[1].Value.Trim() }
+    return $null
+}
+
+foreach ($case in @(
+    @{ Fail = 'info'; Next = '(?m)^compose --profile community (pull|up)' },
+    @{ Fail = 'pull'; Next = '(?m)^compose --profile community up' },
+    @{ Fail = 'up';   Next = '(?m)^compose exec' }
+)) {
+    $run = Invoke-Installer -Name "fail-$($case.Fail)" -EnvOverrides @{ FSEVEN_TEST_DOCKER_FAIL = $case.Fail }
+    if ($run.ExitCode -eq 0) {
+        Fail "install.ps1 exited 0 although docker $($case.Fail) failed (PAB5)"
+    }
+    if ($run.Output -match 'is running at') {
+        Fail "install.ps1 printed 'is running' although docker $($case.Fail) failed (PAB5)"
+    }
+    if ($run.Calls -match $case.Next) {
+        Fail "install.ps1 went on to the next docker step after $($case.Fail) failed (PAB5): $($run.Calls)"
+    }
+    Pass "PAB5: install.ps1 exits $($run.ExitCode), never says 'is running' and stops at the failed $($case.Fail)"
+}
+
+# ── Scenario 3: -Port / -Image win over .env on a re-run (PAB4) ─────────────
+# Over the fresh install from scenario 1 (run from disk). The stub dumps the
+# environment `compose up` ran with, which is what Compose would have used.
+$reRunDir = $freshFile.Dir
+$envFile  = Join-Path $reRunDir '.env'
+$before   = @{}
+foreach ($key in @('POSTGRES_PASSWORD', 'FSEVEN_APP_DB_PASSWORD', 'ADMIN_API_KEY', 'CREDENTIAL_ENCRYPTION_KEY')) {
+    $before[$key] = Get-EnvValue $envFile $key
+}
+$dump = Join-Path $Root 'pab4-up.env'
+$reRun = Invoke-Installer -Name 'fresh-file' -ExtraArgs @('-Port', '9090', '-Image', 'example/override:1') `
+    -EnvOverrides @{ FSEVEN_TEST_ENV_DUMP = $dump; FSEVEN_TEST_HEALTHCHECK = 'yes'; FSEVEN_TEST_BOOTSTRAP_READY = 'no' }
+if ($reRun.ExitCode -ne 0) { Fail "the re-run with -Port 9090 -Image example/override:1 exited $($reRun.ExitCode)" }
+if ($reRun.Output -notmatch 'Existing \.env PORT=8080 replaced by PORT=9090') {
+    Fail "the re-run did not log the PORT rewrite (PAB4)"
+}
+if ($reRun.Output -notmatch 'running at http://localhost:9090') {
+    Fail "the re-run did not print the port -Port asked for (PAB4)"
+}
+$dumpText = Read-TextFile $dump
+if ($dumpText -notmatch '(?m)^PORT=9090\s*$') {
+    Fail "docker compose up ran with a PORT other than 9090 (PAB4): the printed URL and the bound port disagree"
+}
+if ($dumpText -notmatch '(?m)^CONTROLLER_IMAGE=example/override:1\s*$') {
+    Fail "docker compose up ran with a CONTROLLER_IMAGE other than example/override:1 (PAB4)"
+}
+if ((Get-EnvValue $envFile 'PORT') -ne '9090') { Fail ".env PORT is not 9090 after the re-run (PAB4)" }
+if ((Get-EnvValue $envFile 'CONTROLLER_IMAGE') -ne 'example/override:1') { Fail ".env CONTROLLER_IMAGE was not rewritten (PAB4)" }
+foreach ($key in $before.Keys) {
+    if ((Get-EnvValue $envFile $key) -ne $before[$key]) { Fail "the .env rewrite changed $key; only PORT and CONTROLLER_IMAGE may change (PAB4)" }
+}
+foreach ($copy in @('.env.pb4.bak', '.env.pab4.tmp')) {
+    if (Test-Path (Join-Path $reRunDir $copy)) { Fail "$copy survived the re-run: a full plaintext copy of every secret in .env, left on disk" }
+}
+Pass "PAB4: -Port/-Image win over .env on a re-run; URL, Compose and .env agree; secrets untouched"
+
+$flagless = Invoke-Installer -Name 'fresh-file' -EnvOverrides @{ FSEVEN_TEST_ENV_DUMP = $dump; FSEVEN_TEST_HEALTHCHECK = 'yes'; FSEVEN_TEST_BOOTSTRAP_READY = 'no' }
+if ($flagless.ExitCode -ne 0) { Fail "the flagless re-run exited $($flagless.ExitCode)" }
+if ($flagless.Output -match 'replaced by') { Fail "a flagless re-run rewrote .env (PAB4)" }
+if ((Read-TextFile $dump) -notmatch '(?m)^PORT=9090\s*$') { Fail "a flagless re-run moved the port away from 9090 (PAB4)" }
+if ($flagless.Output -notmatch 'running at http://localhost:9090') { Fail "a flagless re-run printed a port other than 9090 (PAB4)" }
+Pass "PAB4: a flagless re-run keeps what .env says"
+
+$back = Invoke-Installer -Name 'fresh-file' -ExtraArgs @('-Port', '8080') `
+    -EnvOverrides @{ FSEVEN_TEST_ENV_DUMP = $dump; FSEVEN_TEST_HEALTHCHECK = 'yes'; FSEVEN_TEST_BOOTSTRAP_READY = 'no' }
+if ($back.ExitCode -ne 0) { Fail "the re-run with -Port 8080 exited $($back.ExitCode)" }
+if ($back.Output -notmatch 'Existing \.env PORT=9090 replaced by PORT=8080') { Fail "-Port 8080 over 9090 was not honoured (PAB4)" }
+if ((Read-TextFile $dump) -notmatch '(?m)^PORT=8080\s*$') { Fail "docker compose up did not run with PORT=8080 after -Port 8080 (PAB4)" }
+if ((Get-EnvValue $envFile 'PORT') -ne '8080') { Fail ".env PORT is not 8080 after -Port 8080 (PAB4)" }
+Pass "PAB4: -Port 8080 over 9090 moves it back (the default value, given, still wins)"
 
 Remove-Item -LiteralPath $Root -Recurse -Force -ErrorAction SilentlyContinue
 Write-Host "`ninstall.ps1 Windows PowerShell 5.1 gate passed" -ForegroundColor Green

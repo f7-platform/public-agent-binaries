@@ -1,4 +1,4 @@
-# install.ps1 — fseven-controller one-line installer for Windows
+﻿# install.ps1 — fseven-controller one-line installer for Windows
 #
 # Per PROPOSAL-community-deployment §B3. Mirrors install.sh for
 # Windows Docker Desktop users.
@@ -11,6 +11,9 @@
 #   -Image <ref>        Override controller image
 #                        (default: ghcr.io/f7-platform/public-agent-binaries/controller:latest)
 #   -Port <int>         Host port for the controller (default 8080)
+#                        On a re-run over an existing .env, -Image and -Port
+#                        replace the matching .env line when given; without
+#                        them the .env values are kept.
 #   -WithAgent          Also try to install the agent on this host. The
 #                        agent is shelved and the current release publishes
 #                        no agent installer, so the installer no longer asks;
@@ -58,6 +61,98 @@ if (Test-Path Variable:\IsWindows) { $script:OnWindows = [bool](Get-Variable -Na
 function Write-Step($msg)  { Write-Host "▸ $msg" -ForegroundColor Cyan }
 function Write-Warn2($msg) { Write-Host "! $msg" -ForegroundColor Yellow }
 function Write-Fail($msg)  { Write-Host "✘ $msg" -ForegroundColor Red; exit 1 }
+
+function Invoke-Docker {
+    # Run the docker CLI as a native command and return what it wrote and how it
+    # exited, without letting its stderr become a terminating error.
+    #
+    # PAB5 / PAB6 (Audit Run 43). Every docker call in this script goes through
+    # here, for two reasons that are both about the shell README.md advertises:
+    #
+    #   * A native command's non-zero exit raises no exception, so the try/catch
+    #     that used to wrap `docker compose version` and `docker info` never ran
+    #     its catch, `pull` and `up -d` were not checked at all, and "fseven
+    #     controller is running" was printed whether or not anything was (PAB5).
+    #     Callers read .ExitCode and decide.
+    #   * Under Windows PowerShell 5.1, with the Stop preference this script sets,
+    #     redirecting a native command's stderr (2>$null, 2>&1) wraps each stderr
+    #     line in a NativeCommandError record and the first one is a terminating
+    #     error. The real docker writes "Error: No such volume" to stderr at the
+    #     stale-volume probe on every fresh install, so that probe aborted the
+    #     install on 5.1 (PAB6). PowerShell 7.2+ does not apply the preference to
+    #     native stderr. The preference is relaxed to Continue for the duration of
+    #     this one call, stderr is merged into the output and each wrapped record
+    #     is turned back into its text, $LASTEXITCODE is captured at once, and the
+    #     preference is restored in a finally, under either edition.
+    param([Parameter(Mandatory)][string[]]$Arguments)
+    $saved = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        $raw = @(& docker @Arguments 2>&1)
+        $code = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $saved
+    }
+    $lines = @(foreach ($item in $raw) {
+        if ($item -is [System.Management.Automation.ErrorRecord]) { $item.ToString() } else { [string]$item }
+    })
+    return @{ ExitCode = [int]$code; Output = ($lines -join "`n") }
+}
+
+function Invoke-ControllerPsql([string]$Sql) {
+    # One query against the controller database through the compose project, as
+    # the agent step needs; empty on any failure, so a docker or psql error can
+    # never be mistaken for a value (the stderr it used to discard is now part of
+    # the output, see Invoke-Docker).
+    $r = Invoke-Docker @('compose', 'exec', '-T', 'postgres', 'psql', '-U', 'seven', '-d', 'seven_controller', '-tAc', $Sql)
+    if ($r.ExitCode -ne 0) { return '' }
+    return $r.Output.Trim()
+}
+
+function Update-EnvLineFromFlag {
+    # PAB4 (Audit Run 43): on a re-run over an existing .env, a flag given on the
+    # command line wins over the value in .env, and the .env line is rewritten so
+    # that Compose (which reads .env), the printed dashboard URL and the token-mint
+    # URL all agree. Without the flag, .env's value is kept and returned, so a
+    # re-run never moves the port or changes the controller image on its own.
+    #
+    # Every line of .env is a secret, so the rewrite goes through Write-SecretFile
+    # into a temporary file in the install directory (created empty, restricted,
+    # then written), which is then moved over .env; the temporary file is removed
+    # on every exit path, as .env.pb4.bak is.
+    param(
+        [string]$EnvFile,
+        [string]$Key,
+        [string]$Flag,
+        [bool]$Given,
+        [string]$Value
+    )
+    $text = Get-Content $EnvFile -Raw
+    $pattern = "(?m)^$Key=(.*)$"
+    $current = $null
+    if ($text -match $pattern) { $current = $Matches[1].Trim() }
+    if (-not $Given) { return $current }
+    if ($current -eq $Value) { return $Value }
+
+    if ($null -ne $current) {
+        $replacement = ("$Key=$Value").Replace('$', '$$')
+        $text = ([regex]$pattern).Replace($text, $replacement, 1)
+        Write-Step "Existing .env $Key=$current replaced by $Key=$Value ($Flag given on the command line)"
+    } else {
+        if (-not $text.EndsWith("`n")) { $text += "`n" }
+        $text += "$Key=$Value`n"
+        Write-Step "Added $Key=$Value to the existing .env ($Flag given on the command line)"
+    }
+    $tmp = "$EnvFile.pab4.tmp"
+    try {
+        Write-SecretFile $tmp $text
+        Move-Item -Path $tmp -Destination $EnvFile -Force
+        Protect-FilePath $EnvFile
+    } finally {
+        if (Test-Path $tmp) { Remove-Item $tmp -Force -ErrorAction SilentlyContinue }
+    }
+    return $Value
+}
 
 function New-Secret {
     # 32 bytes of cryptographic entropy, hex-encoded (64 chars). Uses
@@ -256,8 +351,8 @@ function Add-PersistentJwtKey {
         # Verify the PEM actually renders through THIS machine's compose build before
         # committing to it; restore the previous .env if it does not, so a compose
         # parser gap degrades to the old behaviour instead of breaking the install.
-        $rendered = $null
-        try { $rendered = (docker compose --profile community config 2>$null | Out-String) } catch { $rendered = $null }
+        $render = Invoke-Docker @('compose', '--profile', 'community', 'config')
+        $rendered = if ($render.ExitCode -eq 0) { $render.Output } else { $null }
         if ($rendered -and $rendered -match 'BEGIN PRIVATE KEY') {
             Write-Step "Provisioned a persistent JWT signing key (agent tokens now survive controller restarts)"
         } else {
@@ -349,16 +444,24 @@ Docker is not installed. Install Docker Desktop for Windows first:
 '@
     }
 
-    try { docker compose version | Out-Null }
-    catch {
-        Write-Fail "Docker Compose v2 is required ('docker compose'). Update Docker Desktop."
+    # PAB5: a native command's non-zero exit raises no exception, so the try/catch
+    # that used to sit here never caught anything. Read the exit code instead.
+    $composeProbe = Invoke-Docker @('compose', 'version')
+    if ($composeProbe.ExitCode -ne 0) {
+        Write-Fail "Docker Compose v2 is required ('docker compose'). Update Docker Desktop.`n$($composeProbe.Output)"
     }
 
-    try { docker info | Out-Null }
-    catch {
-        Write-Fail "Docker daemon is not running. Start Docker Desktop and re-run."
+    $infoProbe = Invoke-Docker @('info')
+    if ($infoProbe.ExitCode -ne 0) {
+        Write-Fail "Docker daemon is not running. Start Docker Desktop and re-run.`n$($infoProbe.Output)"
     }
 }
+
+# PAB4: remember whether -Image / -Port were GIVEN, not whether they differ from
+# the default. Comparing against the default cannot tell `-Port 8080` from no
+# flag, and a flag that is given must win over .env on a re-run.
+$ImageGiven = $PSBoundParameters.ContainsKey('Image')
+$PortGiven  = $PSBoundParameters.ContainsKey('Port')
 
 New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
 Set-Location $InstallDir
@@ -374,7 +477,11 @@ if (-not $ProvisionEnvOnly) {
     } catch {
         Write-Warn2 "Could not fetch release manifest from $ManifestUrl; remote artifacts will require explicit checksums."
     }
-    if ($script:ReleaseManifest -and $Image -eq 'ghcr.io/f7-platform/public-agent-binaries/controller:latest') {
+    # Resolve the controller image from the manifest only when that value will be
+    # used: a fresh install with no -Image. On a re-run the image in .env is kept
+    # (PAB4: re-runs change the image only with -Image), so announcing a
+    # manifest-resolved image there would name one the install does not use.
+    if ($script:ReleaseManifest -and -not $ImageGiven -and -not (Test-Path (Join-Path $InstallDir '.env'))) {
         $resolved = Get-JsonPath $script:ReleaseManifest 'controller.image'
         if ($resolved) {
             $Image = [string]$resolved
@@ -391,11 +498,17 @@ if (Test-Path $EnvFile) {
     # Backfill CREDENTIAL_ENCRYPTION_KEY for installs that predate the
     # controller's encrypted-credential requirement (controller startup
     # rejects empty key outside dev). Mirrors install.sh behavior.
-    $existing = Get-Content $EnvFile -Raw
-    if ($existing -match '(?m)^PORT=(\d+)$') {
-        $Port = [int]$Matches[1]
-        Write-Step "Existing .env PORT detected; using port $Port"
+    # PAB4: a -Port / -Image given on the command line wins over .env and is
+    # written into it; otherwise .env's value is what this run uses, for Compose
+    # and for every URL this script prints.
+    $envPort = Update-EnvLineFromFlag -EnvFile $EnvFile -Key 'PORT' -Flag '-Port' -Given $PortGiven -Value ([string]$Port)
+    if ($envPort -match '^\d+$') {
+        $Port = [int]$envPort
+        if (-not $PortGiven) { Write-Step "Existing .env PORT detected; using port $Port" }
     }
+    $envImage = Update-EnvLineFromFlag -EnvFile $EnvFile -Key 'CONTROLLER_IMAGE' -Flag '-Image' -Given $ImageGiven -Value $Image
+    if ($envImage) { $Image = $envImage }
+    $existing = Get-Content $EnvFile -Raw
     if ($existing -notmatch '(?m)^CREDENTIAL_ENCRYPTION_KEY=') {
         $CredentialEncryptionKey = New-Secret
         $timestamp = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
@@ -491,14 +604,16 @@ if (-not (Test-Path $ComposeFile)) {
 if ($FreshInstall) {
     $ProjectName = (Split-Path $InstallDir -Leaf).ToLower() -replace '[^a-z0-9_-]', '_'
     $StaleVol = "${ProjectName}_pgdata"
-    $volProbe = docker volume inspect $StaleVol 2>$null
-    if ($LASTEXITCODE -eq 0) {
+    # PAB6: the real CLI answers a missing volume with an Error line on stderr
+    # and exit 1; Invoke-Docker keeps that from terminating the script on 5.1.
+    $volProbe = Invoke-Docker @('volume', 'inspect', $StaleVol)
+    if ($volProbe.ExitCode -eq 0) {
         Write-Warning "Docker volume '$StaleVol' already exists from a previous install but this directory has a freshly-generated POSTGRES_PASSWORD. Postgres will refuse the new password and the controller will fail to start."
         if ([Environment]::UserInteractive -and $Host.UI.RawUI) {
             $reply = Read-Host "  Reset the stale volume now? [y/N]"
             if ($reply -match '^(y|Y|yes|YES)$') {
-                docker volume rm $StaleVol | Out-Null
-                if ($LASTEXITCODE -eq 0) {
+                $volRm = Invoke-Docker @('volume', 'rm', $StaleVol)
+                if ($volRm.ExitCode -eq 0) {
                     Write-Step "Removed stale volume $StaleVol"
                 } else {
                     throw "Failed to remove $StaleVol — close other docker compose projects using it, then re-run."
@@ -521,11 +636,47 @@ if ($FreshInstall) {
 Add-PersistentJwtKey -EnvFile $EnvFile -VerifyRender
 
 # ── Step 4. Pull + up ────────────────────────────────────────────────
+# PAB4: Compose prefers the shell environment over .env, so hand it the exact
+# values this run resolved (the flag when given, otherwise .env's), which are
+# also what the dashboard URL and the token-mint URL below use.
+$env:PORT = [string]$Port
+$env:CONTROLLER_IMAGE = $Image
+
+# PAB5: `pull` and `up -d` used to run unchecked, and "is running" was printed
+# whatever they did. Each is read for its exit code; a failure stops here.
 Write-Step "Pulling latest controller image"
-docker compose --profile community pull
+$pull = Invoke-Docker @('compose', '--profile', 'community', 'pull')
+if ($pull.Output) { Write-Host $pull.Output }
+if ($pull.ExitCode -ne 0) {
+    if ($pull.Output -match 'manifest unknown|not found|denied|unauthorized') {
+        Write-Fail @"
+Image pull failed: the controller image could not be fetched from the registry.
+
+This installer is published from the public-agent-binaries repo, which
+intentionally does NOT contain a Dockerfile or controller source - it is
+a distribution shell only. There is no local-build fallback (PD2).
+
+To recover:
+  1. Confirm CONTROLLER_IMAGE points at a published tag, e.g.
+       ghcr.io/f7-platform/public-agent-binaries/controller:<tag>
+     and re-run install.ps1 with -Image <that ref>. The default 'latest' is
+     sometimes unavailable between releases; pin a specific version from the
+     public release notes.
+  2. If you are behind a registry mirror or air-gapped, follow the
+     air-gapped install steps in the public docs (search 'air-gapped').
+  3. If you are entitled to the source build, use the private
+     fseven-controller repo and its 'docker build' instructions there.
+"@
+    }
+    Write-Fail "Image pull failed for an unrecognised reason (docker compose pull exited $($pull.ExitCode)); see the output above."
+}
 
 Write-Step "Starting services (profile: community)"
-docker compose --profile community up -d
+$up = Invoke-Docker @('compose', '--profile', 'community', 'up', '-d')
+if ($up.Output) { Write-Host $up.Output }
+if ($up.ExitCode -ne 0) {
+    Write-Fail "docker compose up exited $($up.ExitCode); the controller is not running. Check: docker compose --profile community logs"
+}
 
 # ── Step 5. Wait for bootstrap to finish ─────────────────────────────
 # Poll the persisted secrets file (written as the final bootstrap step)
@@ -537,8 +688,9 @@ $SecretsPath = "/app/model-storage/bootstrap/secrets.env"
 $AdminEmail = $null
 $BootstrapReady = $false
 while ((Get-Date) -lt $deadline) {
-    $creds = docker compose exec -T controller cat $SecretsPath 2>$null
-    if ($LASTEXITCODE -eq 0 -and $creds) {
+    $credsRun = Invoke-Docker @('compose', 'exec', '-T', 'controller', 'cat', $SecretsPath)
+    $creds = if ($credsRun.ExitCode -eq 0) { $credsRun.Output } else { $null }
+    if ($creds) {
         $AdminEmail = ($creds -split "`n" | Where-Object { $_ -match '^FSEVEN_BOOTSTRAP_ADMIN_EMAIL=' } |
             ForEach-Object { ($_ -split '=', 2)[1].Trim() } | Select-Object -First 1)
         if ($AdminEmail -and (($creds -split "`n") -match '^FSEVEN_BOOTSTRAP_ADMIN_PASSWORD=')) {
@@ -547,7 +699,7 @@ while ((Get-Date) -lt $deadline) {
         }
     }
     if (-not $FreshInstall) {
-        $logs = docker compose logs --no-color controller 2>$null
+        $logs = (Invoke-Docker @('compose', 'logs', '--no-color', 'controller')).Output
         if ($logs -match 'Listening \(healthcheck ready\)') { break }
     }
     Start-Sleep -Seconds 2
@@ -604,15 +756,9 @@ function Install-FsevenAgent {
 
     Write-Step "Fetching default-org id for enrollment-token minting"
     # Prefer the bootstrap-stamped org id from system_state.
-    $orgId = (docker compose exec -T postgres `
-                psql -U seven -d seven_controller -tAc `
-                  "SELECT value->>'org_id' FROM system_state WHERE key = 'bootstrap'" `
-              2>$null).Trim()
+    $orgId = Invoke-ControllerPsql "SELECT value->>'org_id' FROM system_state WHERE key = 'bootstrap'"
     if (-not $orgId) {
-        $orgId = (docker compose exec -T postgres `
-                    psql -U seven -d seven_controller -tAc `
-                      "SELECT org_id FROM orgs ORDER BY created_at ASC LIMIT 1" `
-                  2>$null).Trim()
+        $orgId = Invoke-ControllerPsql "SELECT org_id FROM orgs ORDER BY created_at ASC LIMIT 1"
     }
     if (-not $orgId) {
         Write-Warn2 "Could not read default org id — skipping agent install."
@@ -622,10 +768,7 @@ function Install-FsevenAgent {
     # Skip if a device with this hostname is already enrolled (§B6 item 5).
     $hostName = [System.Net.Dns]::GetHostName()
     $escaped  = $hostName.Replace("'", "''")
-    $enrolled = (docker compose exec -T postgres `
-                   psql -U seven -d seven_controller -tAc `
-                     "SELECT 1 FROM devices WHERE hostname = '$escaped' LIMIT 1" `
-                 2>$null).Trim()
+    $enrolled = Invoke-ControllerPsql "SELECT 1 FROM devices WHERE hostname = '$escaped' LIMIT 1"
     if ($enrolled) {
         Write-Step "Device '$hostName' already enrolled — skipping agent install"
         return
@@ -706,15 +849,9 @@ function Install-FsevenAgent {
     while ((Get-Date) -lt $deadline) {
         $seen = ""
         if ($tokenHash) {
-            $seen = (docker compose exec -T postgres `
-                       psql -U seven -d seven_controller -tAc `
-                         "SELECT 1 FROM enrollment_tokens WHERE token_hash = '$tokenHashEscaped' AND use_count > 0" `
-                     2>$null).Trim()
+            $seen = Invoke-ControllerPsql "SELECT 1 FROM enrollment_tokens WHERE token_hash = '$tokenHashEscaped' AND use_count > 0"
         } else {
-            $seen = (docker compose exec -T postgres `
-                       psql -U seven -d seven_controller -tAc `
-                         "SELECT 1 FROM devices WHERE hostname = '$escaped' LIMIT 1" `
-                     2>$null).Trim()
+            $seen = Invoke-ControllerPsql "SELECT 1 FROM devices WHERE hostname = '$escaped' LIMIT 1"
         }
         if ($seen) {
             Write-Host ""

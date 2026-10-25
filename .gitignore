@@ -1,0 +1,16 @@
+# Secrets written into a clone of this public repository (Audit Run 43, SEC14).
+#
+# install.sh and install.ps1 write the generated Postgres owner password, the
+# fseven_app role password, the admin API key, the credential encryption key and
+# the JWT signing key into <install dir>/.env, and install.sh's default install
+# directory is ./fseven, so an install run from inside a clone lands every one of
+# those secrets in this working tree. .env.example tells a local developer to
+# copy it to .env at the root. None of those values has a provider token shape,
+# so GitHub's push protection would not stop an accidental `git add -A`.
+#
+# .env.* covers the installers' temporary secret copies (.env.pb4.bak,
+# .env.pab4.tmp); .env.example is the committed template and stays tracked.
+.env
+.env.*
+!.env.example
+fseven/
