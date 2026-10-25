@@ -1,6 +1,6 @@
 # Changelog
 
-All notable changes to `public-agent-binaries` are documented in this file. This repository distributes pre-built F7 Agent installers; version entries mirror `fseven-agent` release tags.
+All notable changes to `public-agent-binaries` are documented in this file. This repository publishes the F7 releases: the controller installers, compose file and manifest, and, before the agent was shelved, the agent installers. Version entries follow this repository's release tags; see the Versioning Policy at the end for where each tag came from.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
@@ -136,6 +136,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
   after a warning that the agent is shelved. (#60, Closes #59)
 
 ### Fixed
+
+- **(Audit Run 43, PAB11 / PAB12) This CHANGELOG says what releases carry and
+  where they come from.** Its Release Trust paragraph said published assets
+  include `.sha256` sidecars, which no release has carried, and the gate pinned
+  that paragraph; it now says what README.md says, and
+  `tests/bootstrap-handoff-static.sh` pins the corrected sentence and refuses
+  the old one. The header said version entries mirror `fseven-agent` tags and
+  the Versioning Policy said this repository only receives binaries, while the
+  current release, v0.3.0, is controller-only and fixes are committed here; both
+  now say which workflow publishes which release, and that v0.3.0 has no
+  section of its own. (Refs f7-platform/fseven-backbone#621)
 
 - **(Audit Run 43, PAB9 / PAB10 / PAB13 / PAB14) The documents say what the
   installers and the repository do.** The README said the installer prints the
@@ -396,16 +407,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 - Manual Enterprise/MDM install snippets now verify downloaded agent assets with
   SHA-256 sidecars before installation; macOS snippets also run
   `pkgutil --check-signature`, and Windows snippets require valid Authenticode
-  status.
+  status. #60 later removed these snippets, and no release has carried the
+  `.sha256` sidecars they fetched.
 - Static README checks now pin manual checksum/signature verification commands.
 
 ### Release Trust
 
-- Release trust is per tag: published assets include SHA-256 `.sha256` sidecars
-  and manifest checksum metadata, while macOS notarization and Windows
-  Authenticode signatures are present only when release signing credentials are
-  active for that tag. Release notes should say which signing and notarization
-  steps ran for each release.
+- Release trust is per tag. No release has published `.sha256` sidecar files,
+  and the agent entries in `release-manifest.json` carry no checksums; a release
+  that has a `SHA256SUMS` asset lists the SHA-256 checksum of each file that
+  asset covers, which in v0.3.0 are the controller-side files. macOS
+  notarization and Windows Authenticode signatures are present only when
+  release signing credentials are active for that tag.
+  Release notes should say which signing and notarization steps ran for each
+  release.
 
 ### Planned
 
@@ -453,6 +468,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 
 ## Versioning Policy
 
-- Version bumps originate in `fseven-agent` release tags.
-- This repo only ever receives binaries; humans should not commit directly.
-- For historical releases, see the GitHub Releases page at `github.com/f7-platform/fseven-agent`.
+- Releases are published here by two workflows in other repositories, each on
+  a tag pushed there: `fseven-controller`'s release workflow publishes the
+  controller release assets, and `fseven-agent`'s published the agent
+  installers. The agent is shelved: the last release its workflow published to
+  is v0.2.5-rc3, and `fseven-agent` has no v0.3.0 tag.
+- The current release, v0.3.0 (2026-07-15), is controller-only and has no
+  section above; its release notes on this repository's Releases page are the
+  record of what it shipped.
+- Changes to the installers, the compose file, the documentation and the tests
+  are committed to this repository directly, through pull requests, and are
+  recorded under `[Unreleased]`.
+- For the agent's own release history, see the GitHub Releases page at `github.com/f7-platform/fseven-agent`.

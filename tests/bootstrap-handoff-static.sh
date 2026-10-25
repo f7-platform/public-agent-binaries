@@ -642,6 +642,30 @@ assert_contains \
   "$ROOT_DIR/CHANGELOG.md" \
   'Release notes should say which signing and notarization' \
   'per-release signing/notarization status'
+# PAB11 (audit run 43): the per-tag paragraph above said releases publish
+# `.sha256` sidecars, which no release has carried (README.md, CLAUDE.md and
+# the Copilot instructions say so, and #60 removed the snippets that fetched
+# them). Pin the corrected sentence and refuse the old one.
+assert_contains \
+  "$ROOT_DIR/CHANGELOG.md" \
+  'No release has published `.sha256` sidecar files' \
+  'PAB11: CHANGELOG release trust says no release carries .sha256 sidecars'
+assert_not_contains \
+  "$ROOT_DIR/CHANGELOG.md" \
+  'published assets include SHA-256' \
+  'PAB11: CHANGELOG claim that releases publish .sha256 sidecars'
+# PAB12 (audit run 43): v0.3.0 is a controller-only release published by
+# fseven-controller's workflow, and fixes are committed here directly, so the
+# CHANGELOG may no longer say its versions mirror fseven-agent tags or that
+# nobody commits here.
+assert_not_contains \
+  "$ROOT_DIR/CHANGELOG.md" \
+  'version entries mirror `fseven-agent` release tags' \
+  'PAB12: CHANGELOG claim that versions mirror fseven-agent tags'
+assert_not_contains \
+  "$ROOT_DIR/CHANGELOG.md" \
+  'humans should not commit directly' \
+  'PAB12: CHANGELOG claim that this repository only receives binaries'
 # PAB3 (Run 42): the org renamed from `fseven-ai` to `f7-platform`. The
 # CHANGELOG's Versioning Policy footer still pointed readers at the old
 # org's GitHub Releases page, which no longer serves this project. Scan the
