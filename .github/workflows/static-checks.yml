@@ -95,6 +95,26 @@ jobs:
         shell: pwsh
         run: ./tests/install-ps1-acl-windows.ps1
 
+  # PAB5 / PAB6 (Audit Run 43): README.md advertises Windows PowerShell 5.1, and
+  # nothing above runs install.ps1 on it. The ubuntu job runs it under PowerShell
+  # Core on Linux; the ACL job above runs it under pwsh and stops at
+  # -ProvisionEnvOnly before the first docker call. 5.1 turns a redirected native
+  # command's stderr into a terminating error under the Stop preference, and the
+  # real docker writes to stderr at the stale-volume probe on every fresh install,
+  # so the advertised shell has to execute the real docker-calling path. This job
+  # runs install.ps1 on the 5.1 engine (`shell: powershell` is Windows PowerShell;
+  # `pwsh` is PowerShell 7) against a stub docker.cmd that writes to stderr where
+  # the real CLI does and never contacts a daemon.
+  install-ps1-windows-powershell-51:
+    if: github.event_name != 'schedule'
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: install.ps1 under Windows PowerShell 5.1 against a stub docker (PAB5/PAB6)
+        shell: powershell
+        run: ./tests/install-ps1-windows-powershell-51.ps1
+
   # #29 (Audit Run 37) — Published controller-image parity gate. The env-contract
   # gate above renders the compose in isolation; it never looks at the IMAGE the
   # compose points at, which is exactly how the "dead on arrival" community stack
