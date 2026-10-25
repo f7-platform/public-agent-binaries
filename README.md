@@ -63,6 +63,24 @@ Save the printed credentials immediately and rotate the password after login.
 **Requirements:** Docker Desktop (macOS / Windows) or Docker Engine (Linux)
 with Compose v2; loopback port `8080` free.
 
+With this repository's Compose file the controller is published on `127.0.0.1`
+only, like the other services. To reach it from another machine, set
+`CONTROLLER_BIND=0.0.0.0` in the install directory's `.env` and run
+`docker compose --profile community up -d` again. **Warning:** that publishes
+the dashboard, the first-run login and the admin API over
+plain HTTP on every interface of the host; only do it behind a reverse proxy
+that terminates TLS, and keep the port closed at the firewall otherwise.
+
+**Installs from the current release do not have this yet.** The install commands
+above deploy the Compose file the release manifest names, and the current
+release's (v0.3.0) copy still publishes the controller on every interface and
+ignores `CONTROLLER_BIND`, so until a release carries this repository's Compose
+file a fresh install is reachable from the LAN over plain HTTP. Stopgap until
+then: keep port `8080` closed at the host firewall, or edit the controller's
+port line in the installed `docker-compose.yml` to
+`"127.0.0.1:${PORT:-8080}:8080"` and run `docker compose --profile community up -d`
+again.
+
 ### Step 2 — Log in + open the pairing page
 
 Open <http://localhost:8080>, log in with the printed credentials, then go to
@@ -81,7 +99,9 @@ When an agent installer was published, it was installed normally and on first
 launch opened a local browser tab where you pasted:
 
 - **Controller URL** — `http://localhost:8080` if you're on the same machine
-  as the controller, otherwise the LAN URL (e.g. `http://192.168.1.5:8080`).
+  as the controller, otherwise the LAN URL (e.g. `http://192.168.1.5:8080`),
+  which only works once the controller host has opted in with
+  `CONTROLLER_BIND=0.0.0.0` behind a TLS proxy (see §1 Step 1).
 - **Pairing code** — the 6 digits from **Connect an agent**.
 
 Alternatively, scan the QR code from the dashboard with your phone and open
@@ -112,8 +132,9 @@ rotating in the background; any valid, unexpired code works.
 If someone on your team has already stood up a controller and given you a
 URL, skip §1. You only need:
 
-- the **controller URL** (`http://<host>:8080` on LAN, or the public HTTPS
-  URL if your team hosts it externally),
+- the **controller URL** (`http://<host>:8080` on LAN, which needs the
+  controller host to have opted in with `CONTROLLER_BIND=0.0.0.0` behind a TLS
+  proxy, or the public HTTPS URL if your team hosts it externally),
 - a way to pair — either a **6-digit code** (they read it off the dashboard
   for you) or an **enrollment token** (for silent install; see §3).
 
@@ -262,9 +283,16 @@ triggered by a tag pushed to its own repository:
 
 1. **`fseven-controller`** (`.github/workflows/release.yml`) — triggered by
    pushing a `vX.Y.Z` tag to `fseven-controller`. Builds the controller image, pushes to
-   `ghcr.io/f7-platform/public-agent-binaries/controller`, publishes
-   `release-manifest.json` + install scripts, and syncs `install.sh` /
-   `install.ps1` / `docker-compose.yml` to the `main` branch of this repo.
+   `ghcr.io/f7-platform/public-agent-binaries/controller`, and publishes
+   `release-manifest.json` together with copies of `install.sh`, `install.ps1`
+   and `docker-compose.yml` as release assets. The installers deploy the compose
+   file the manifest names. This repository's `docker-compose.yml` deliberately
+   differs from the controller's own: it omits the `build:` stanza, because no
+   controller source or Dockerfile is published here, and it publishes the
+   controller on loopback by default. Any sync of that file to `main` must keep
+   those differences, and `tests/published-compose-contract.sh` checks the
+   manifest-named compose against this tree's security contract on every pull
+   request and weekly.
 2. **`fseven-agent`** (`.github/workflows/release.yml`) — triggered by
    pushing a tag to `fseven-agent`, not by the controller tag. It built
    PKG / MSI / tarball for each platform and uploaded them to the release of
@@ -283,6 +311,14 @@ triggered by a tag pushed to its own repository:
 | `--port <n>` / `-Port <n>` | `8080` | Host port |
 | `--with-agent` / `-WithAgent` | off | Try to install the agent on this host. The agent is shelved and the current release has no agent installer, so this prints a warning, and the download then fails and is skipped unless you supply an agent file and its checksum (`FSEVEN_AGENT_PKG_URL` + `FSEVEN_AGENT_PKG_SHA256` on macOS, `FSEVEN_AGENT_MSI_URL` + `FSEVEN_AGENT_MSI_SHA256` on Windows) |
 | `--no-agent` / `-NoAgent` | — | Skip the agent install; this is now the default, because the installers no longer ask |
+
+On a re-run over an existing install directory, a flag given on the command line
+replaces the matching line in `.env` (`--port` / `-Port` rewrites `PORT`,
+`--image` / `-Image` rewrites `CONTROLLER_IMAGE`) and the installer logs the old
+and new values, so Compose, the printed dashboard URL and the enrollment-token URL
+agree. Without the flag the installer keeps what `.env` says: a re-run never moves
+the port or changes the controller image on its own, and the only way to upgrade
+the controller is to re-run with `--image` / `-Image` naming the new reference.
 
 ---
 

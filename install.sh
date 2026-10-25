@@ -28,6 +28,9 @@
 #   --image <ref>    Override controller image (default:
 #                    ghcr.io/f7-platform/public-agent-binaries/controller:latest).
 #   --port <n>       Host port for the controller (default 8080).
+#                    On a re-run over an existing .env, --image and --port
+#                    replace the matching .env line when given; without
+#                    them the .env values are kept.
 #   --help           Show this message.
 # ─────────────────────────────────────────────────────────────────────
 set -euo pipefail
@@ -54,6 +57,12 @@ CONTROLLER_PORT_DEFAULT="8080"
 WITH_AGENT="${FSEVEN_WITH_AGENT:-auto}"
 CONTROLLER_IMAGE=""
 CONTROLLER_PORT=""
+# PAB4 (Audit Run 43): whether --image / --port were GIVEN, not whether they
+# differ from the default. Comparing against the default cannot tell
+# `--port 8080` from no flag, and a flag that is given must win over .env on
+# a re-run.
+IMAGE_GIVEN=no
+PORT_GIVEN=no
 
 # ── Arg parsing ──────────────────────────────────────────────────────
 while [[ $# -gt 0 ]]; do
@@ -61,10 +70,10 @@ while [[ $# -gt 0 ]]; do
     --with-agent)     WITH_AGENT=yes; shift ;;
     --no-agent)       WITH_AGENT=no;  shift ;;
     --dir)            INSTALL_DIR="$2"; shift 2 ;;
-    --image)          CONTROLLER_IMAGE="$2"; shift 2 ;;
-    --port)           CONTROLLER_PORT="$2"; shift 2 ;;
+    --image)          CONTROLLER_IMAGE="$2"; IMAGE_GIVEN=yes; shift 2 ;;
+    --port)           CONTROLLER_PORT="$2"; PORT_GIVEN=yes; shift 2 ;;
     -h|--help)
-      sed -n '2,32p' "$0"
+      sed -n '2,35p' "$0"
       exit 0
       ;;
     *) echo "unknown option: $1" >&2; exit 2 ;;
@@ -163,6 +172,71 @@ fetch_sidecar_sha256() {
   printf '%s' "$checksum"
 }
 
+# ── Secret-copy cleanup and abort (PB5, Audit Run 37; PAB4, Audit Run 43) ──
+# Two code paths below make a temporary full-plaintext copy of .env in the
+# install directory: Step 3c's .env.pb4.bak (the rollback for the JWT-key render
+# check) and Step 2's .env.pab4.tmp (the rewrite that lets --port / --image win
+# over .env on a re-run). `umask 077` (top of file) means each is CREATED 0600,
+# so unlike the Windows path it is never world-readable, but if this script dies
+# in the window (any command failing under `set -e`, Ctrl-C, SIGTERM) the copy is
+# left behind on disk permanently, long after the installer that knew it was
+# temporary is gone. These two functions are armed as traps around each window.
+pb4_backup_clean() { rm -f "$ENV_FILE.pb4.bak" "$ENV_FILE.pab4.tmp"; }
+
+# A signal handler MUST terminate the script itself. Bash runs an INT/TERM/HUP
+# trap and then *RESUMES* at the next command, so `trap 'rm -f …' EXIT INT TERM HUP`
+# (Audit Run 37 / PR #31) deleted the backup and then carried straight on to
+# `docker compose pull` / `up`, SWALLOWING the operator's Ctrl-C. Before that trap
+# existed, Ctrl-C aborted the install (default disposition); after it, the abort was
+# ignored. Restore the abort: clean up, restore the default disposition, and
+# re-raise, so the process really dies by the signal and the parent shell sees
+# death-by-signal rather than success. `exit` is the belt-and-braces fallback for
+# the case where the signal is blocked or ignored (128+signum, the conventional
+# status a shell reports for a signal-killed child).
+pb4_backup_abort() {
+  local sig="$1" status="$2"
+  pb4_backup_clean
+  trap - EXIT "$sig"
+  kill -"$sig" "$$" 2>/dev/null || true
+  exit "$status"
+}
+
+arm_secret_copy_traps() {
+  trap 'pb4_backup_clean' EXIT
+  trap 'pb4_backup_abort INT 130'  INT
+  trap 'pb4_backup_abort TERM 143' TERM
+  trap 'pb4_backup_abort HUP 129'  HUP
+}
+
+env_set_line() {
+  # PAB4: rewrite (or add) KEY=VALUE in .env so a command-line flag wins on a
+  # re-run, and say so. Every line of .env is a secret, so the edit goes through
+  # a copy created under umask 077 in the install directory and moved over .env,
+  # with the secret-copy traps armed for the whole window; a value that already
+  # matches writes nothing.
+  local key="$1" value="$2" flag="$3" tmp="$ENV_FILE.pab4.tmp" old
+  old="$(sed -n "s/^${key}=//p" "$ENV_FILE" | head -1)"
+  if [[ "$old" == "$value" ]]; then
+    return 0
+  fi
+  arm_secret_copy_traps
+  if [[ -n "$old" ]] || grep -q "^${key}=" "$ENV_FILE"; then
+    awk -v k="$key" -v v="$value" '
+      index($0, k "=") == 1 && !done { print k "=" v; done = 1; next }
+      { print }
+    ' "$ENV_FILE" > "$tmp"
+    log "Existing .env ${key}=${old} replaced by ${key}=${value} (${flag} given on the command line)"
+  else
+    cat "$ENV_FILE" > "$tmp"
+    printf '%s=%s\n' "$key" "$value" >> "$tmp"
+    log "Added ${key}=${value} to the existing .env (${flag} given on the command line)"
+  fi
+  chmod 600 "$tmp"
+  mv "$tmp" "$ENV_FILE"
+  chmod 600 "$ENV_FILE"
+  trap - EXIT INT TERM HUP
+}
+
 verify_macos_pkg_signature() {
   local pkg="$1"
   if [[ "${OS_NAME:-}" == "Darwin" ]] && command -v pkgutil >/dev/null 2>&1; then
@@ -210,8 +284,11 @@ if [[ -z "$MANIFEST_JSON" ]]; then
   warn "Could not fetch release manifest from $MANIFEST_URL; remote artifacts will require explicit checksums."
 fi
 if [[ -n "$MANIFEST_JSON" ]] && command -v python3 >/dev/null 2>&1; then
-  # Resolve controller image unless the user explicitly overrode it.
-  if [[ "$CONTROLLER_IMAGE" == "$CONTROLLER_IMAGE_DEFAULT" ]]; then
+  # Resolve the controller image from the manifest only when that value will be
+  # used: a fresh install with no --image. On a re-run the image in .env is kept
+  # (PAB4: re-runs change the image only with --image), so announcing a
+  # manifest-resolved image there would name one the install does not use.
+  if [[ "$IMAGE_GIVEN" == no && ! -f "$INSTALL_DIR/.env" ]]; then
     resolved="$(manifest_get controller.image)"
     if [[ -n "$resolved" ]]; then
       CONTROLLER_IMAGE="$resolved"
@@ -224,11 +301,27 @@ fi
 ENV_FILE="$INSTALL_DIR/.env"
 if [[ -f "$ENV_FILE" ]]; then
   log "Existing .env found — reusing all values (no secret rotation)"
+  # PAB4: `source` below exports every .env value, PORT and CONTROLLER_IMAGE
+  # included, into the environment of every later `docker compose` call, and
+  # Compose prefers the environment over .env. It also overwrites this script's
+  # CONTROLLER_IMAGE with .env's. Keep the flag values aside, source, then apply:
+  # a flag that was given wins and is written back into .env (so Compose, the
+  # printed URL and the token-mint URL agree); otherwise .env's value is used.
+  flag_image="$CONTROLLER_IMAGE"
+  flag_port="$CONTROLLER_PORT"
   # shellcheck disable=SC1090
   set -a; source "$ENV_FILE"; set +a
-  # Honor PORT from .env on re-runs unless overridden by --port.
-  if [[ "$CONTROLLER_PORT" == "$CONTROLLER_PORT_DEFAULT" && -n "${PORT:-}" ]]; then
+  if [[ "$PORT_GIVEN" == yes ]]; then
+    CONTROLLER_PORT="$flag_port"
+    env_set_line PORT "$CONTROLLER_PORT" --port
+  elif [[ -n "${PORT:-}" ]]; then
     CONTROLLER_PORT="$PORT"
+  fi
+  if [[ "$IMAGE_GIVEN" == yes ]]; then
+    CONTROLLER_IMAGE="$flag_image"
+    env_set_line CONTROLLER_IMAGE "$CONTROLLER_IMAGE" --image
+  elif [[ -z "${CONTROLLER_IMAGE:-}" ]]; then
+    CONTROLLER_IMAGE="$flag_image"
   fi
   # Backfill CREDENTIAL_ENCRYPTION_KEY for installs that predate the
   # controller's encrypted-credential requirement (controller startup
@@ -295,6 +388,10 @@ ENV
   chmod 600 "$ENV_FILE"
   FRESH_INSTALL=yes
 fi
+# PAB4: Compose prefers the shell environment over .env, so hand it the exact
+# values this run resolved, which are also what every URL below is built from.
+export PORT="$CONTROLLER_PORT"
+export CONTROLLER_IMAGE="$CONTROLLER_IMAGE"
 
 # ── Step 3. Fetch the compose file ───────────────────────────────────
 # The installer is typically run from a blank directory, so we fetch
@@ -373,30 +470,9 @@ fi
 # rotated (same contract as POSTGRES_PASSWORD).
 # PB5 (Audit Run 37): .env.pb4.bak is a FULL PLAINTEXT COPY of every secret in
 # .env — POSTGRES_PASSWORD, FSEVEN_APP_DB_PASSWORD, ADMIN_API_KEY,
-# CREDENTIAL_ENCRYPTION_KEY, and the JWT PEM on a re-run. `umask 077` (top of file)
-# means it is CREATED 0600, so unlike the Windows path it is never world-readable —
-# but if this script dies in the window below (any command failing under `set -e`,
-# Ctrl-C, SIGTERM) the copy is left behind on disk permanently, long after the
-# installer that knew it was temporary is gone.
-pb4_backup_clean() { rm -f "$ENV_FILE.pb4.bak"; }
-
-# A signal handler MUST terminate the script itself. Bash runs an INT/TERM/HUP
-# trap and then *RESUMES* at the next command — so `trap 'rm -f …' EXIT INT TERM HUP`
-# (Audit Run 37 / PR #31) deleted the backup and then carried straight on to
-# `docker compose pull` / `up`, SWALLOWING the operator's Ctrl-C. Before that trap
-# existed, Ctrl-C aborted the install (default disposition); after it, the abort was
-# ignored. Restore the abort: clean up, restore the default disposition, and
-# re-raise, so the process really dies by the signal and the parent shell sees
-# death-by-signal rather than success. `exit` is the belt-and-braces fallback for
-# the case where the signal is blocked or ignored (128+signum, the conventional
-# status a shell reports for a signal-killed child).
-pb4_backup_abort() {
-  local sig="$1" status="$2"
-  pb4_backup_clean
-  trap - EXIT "$sig"
-  kill -"$sig" "$$" 2>/dev/null || true
-  exit "$status"
-}
+# CREDENTIAL_ENCRYPTION_KEY, and the JWT PEM on a re-run. It is cleaned on every
+# exit and signal path by pb4_backup_clean / pb4_backup_abort (defined with the
+# helpers above, where Step 2's PAB4 rewrite shares them).
 
 if ! grep -q '^CONTROLLER_JWT_PRIVATE_KEY=' "$ENV_FILE"; then
   if command -v openssl >/dev/null 2>&1; then
@@ -404,10 +480,7 @@ if ! grep -q '^CONTROLLER_JWT_PRIVATE_KEY=' "$ENV_FILE"; then
     if [[ "$JWT_PEM" == *"BEGIN PRIVATE KEY"* ]]; then
       # Armed BEFORE the cp so even a failing cp is covered; disarmed after the
       # rm/mv below has done its job.
-      trap 'pb4_backup_clean' EXIT
-      trap 'pb4_backup_abort INT 130'  INT
-      trap 'pb4_backup_abort TERM 143' TERM
-      trap 'pb4_backup_abort HUP 129'  HUP
+      arm_secret_copy_traps
       cp "$ENV_FILE" "$ENV_FILE.pb4.bak"
       {
         printf '\n# Added by install.sh on %s — persistent Ed25519 JWT signing\n' \
@@ -446,9 +519,17 @@ fi
 
 # ── Step 4. Pull + up ────────────────────────────────────────────────
 log "Pulling latest controller image"
-if ! docker compose --profile community pull 2>&1 | tee /tmp/fseven-pull.log; then
-  if grep -qiE 'manifest unknown|not found|denied|unauthorized' /tmp/fseven-pull.log; then
-    rm -f /tmp/fseven-pull.log
+# PAB17 (Audit Run 43): the pull output used to go to a fixed, predictable file
+# name in the shared /tmp directory, which another user on the host could
+# pre-create (or plant content in) and which the unrecognised-failure branch
+# left behind. The
+# log is a mktemp file now: created 0600 with a name nobody can predict, removed
+# on success and on the recognised failure, and named to the operator only on
+# the unrecognised one, where its content is the diagnosis.
+PULL_LOG="$(mktemp "${TMPDIR:-/tmp}/fseven-pull.XXXXXX")"
+if ! docker compose --profile community pull 2>&1 | tee "$PULL_LOG"; then
+  if grep -qiE 'manifest unknown|not found|denied|unauthorized' "$PULL_LOG"; then
+    rm -f "$PULL_LOG"
     die "Image pull failed: the controller image could not be fetched from the registry.
 
 This installer is published from the public-agent-binaries repo, which
@@ -465,10 +546,10 @@ To recover:
   3. If you are entitled to the source build, use the private
      fseven-controller repo and its 'docker build' instructions there."
   else
-    die "Image pull failed for an unrecognised reason; see /tmp/fseven-pull.log"
+    die "Image pull failed for an unrecognised reason; the pull output is kept at $PULL_LOG"
   fi
 fi
-rm -f /tmp/fseven-pull.log
+rm -f "$PULL_LOG"
 
 log "Starting services (profile: community)"
 docker compose --profile community up -d
@@ -615,9 +696,14 @@ install_agent() {
   log "Minting single-use, 1h-TTL enrollment token"
   local mint_body mint_response token_hash
   mint_body="$(printf '{"label":"install.sh-%s","max_uses":1,"expires_in_hours":1}' "$host_name")"
-  mint_response="$(curl -fsSL -X POST \
+  # PAB19 (Audit Run 43): the admin API key used to be passed as a header
+  # argument on curl's command line, visible in the process list for the
+  # request's lifetime. It now
+  # reaches curl as a config line on standard input (`-K -`), written by printf,
+  # which is a shell builtin, so the key is never in any process's argument vector.
+  mint_response="$(printf 'header = "X-Admin-Key: %s"\n' "$ADMIN_API_KEY" \
+    | curl -fsSL -X POST -K - \
     -H "Content-Type: application/json" \
-    -H "X-Admin-Key: $ADMIN_API_KEY" \
     -d "$mint_body" \
     "http://localhost:${CONTROLLER_PORT}/admin/api/v1/orgs/${org_id}/enrollment-tokens")" \
     || { warn "Token minting failed — skipping agent install"; return 0; }

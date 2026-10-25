@@ -40,6 +40,13 @@
 #                                 verification (base64 raw Ed25519 public key)
 #   CONTROLLER_IMAGE            — image reference (default pulls from GHCR)
 #   PORT                        — host port for the controller (default 8080)
+#   CONTROLLER_BIND             — host address the controller port is published
+#                                 on (default 127.0.0.1, loopback only, like the
+#                                 other *_BIND variables; Audit Run 43, PAB7).
+#                                 CONTROLLER_BIND=0.0.0.0 publishes the dashboard,
+#                                 the first-run login and the admin API over
+#                                 PLAIN HTTP on every interface: only do that
+#                                 behind a TLS-terminating reverse proxy.
 #   POSTGRES_PORT               — host port for Postgres (default 5432)
 #   DEPLOYMENT_MODE             — "Community" | "Cloud". install.sh writes
 #                                 Community; cloud operators set Cloud.
@@ -55,12 +62,17 @@
 #                                   docker compose --profile prod --profile redis up -d
 #                                 and set REDIS_URL=redis://redis:6379 in .env.
 
-# This file is the published mirror of fseven-controller/docker-compose.yml,
-# resynced verbatim on each controller release tag (release.yml). The env
-# contract above must stay in parity with that source of truth; INF9 (Audit Run
-# 34/35) tracks the drift, and tests/bootstrap-handoff-static.sh asserts the
-# security-relevant invariants (fail-closed passwords, digest-pinned third-party
-# images, the CD10 serving-role cutover) so parity gaps fail CI here.
+# This file is derived from fseven-controller/docker-compose.yml and deliberately
+# differs from it (Audit Run 42, PAB2; Audit Run 43, PAB15): the controller's
+# `build:` stanza is omitted, because this repository ships no controller source
+# and no Dockerfile, and the controller port is published on loopback by default
+# (PAB7). A sync from the controller source must keep those differences. The env
+# contract above must stay in parity with that source; INF9 (Audit Run 34/35)
+# tracks the drift, tests/bootstrap-handoff-static.sh asserts the security-relevant
+# invariants (fail-closed passwords, digest-pinned third-party images, the CD10
+# serving-role cutover, the loopback binds) over this file, and
+# tests/published-compose-contract.sh asserts them over the compose the release
+# manifest names, which is the file the installers actually deploy (PAB8).
 
 # ── Controller-image contract (Audit Run 37, #29) ────────────────────────────
 # The DEAD-ON-ARRIVAL failure (#29): this compose was synced to the post-CD10
@@ -79,9 +91,10 @@
 # when it is older than this floor — forcing a current controller image to be
 # published before the drift can reach a self-hoster.
 #
-# KEEP THIS KEY across resyncs (the compose is resynced verbatim from the
-# controller source on each release, release.yml). The parity gate fails closed
-# if it goes missing, so a resync that drops it turns CI red rather than silently
+# KEEP THIS KEY across syncs from the controller source: the published compose
+# is not a verbatim copy of that file (see the header above), and a sync that
+# starts from it must carry this key over. The parity gate fails closed if it
+# goes missing, so a sync that drops it turns CI red rather than silently
 # disabling the guard. Docker Compose ignores top-level `x-` keys — inert at runtime.
 x-fseven-controller-contract:
   min_controller_version: v0.3.0
@@ -148,7 +161,13 @@ services:
     restart: unless-stopped
     profiles: [community, prod]
     ports:
-      - "${PORT:-8080}:8080"
+      # PAB7 (Audit Run 43): loopback by default, like every other service here.
+      # Before this the mapping had no host address, so Docker published the
+      # dashboard, the first-run login and the admin API over plain HTTP on every
+      # interface while README.md said everything ran on localhost. Operators who
+      # want LAN access set CONTROLLER_BIND=0.0.0.0 in .env and put a
+      # TLS-terminating reverse proxy in front; the controller itself speaks HTTP.
+      - "${CONTROLLER_BIND:-127.0.0.1}:${PORT:-8080}:8080"
     environment:
       HOST: "0.0.0.0"
       PORT: "8080"
