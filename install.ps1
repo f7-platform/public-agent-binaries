@@ -424,14 +424,6 @@ function Assert-Sha256([string]$Path, [string]$Expected, [string]$Label) {
     Write-Step "Verified $Label SHA-256: $actual"
 }
 
-function Get-SidecarSha256([string]$Url, [string]$Label) {
-    try {
-        $text = (Invoke-WebRequest -UseBasicParsing -Uri "$Url.sha256").Content
-        if ($text -match '([0-9A-Fa-f]{64})') { return $Matches[1] }
-    } catch {}
-    throw "No SHA-256 checksum available for $Label. Expected $Url.sha256 or release-manifest checksum metadata."
-}
-
 # ── Step 1. Preflight ────────────────────────────────────────────────
 Write-Step "fseven controller installer — checking prerequisites"
 
@@ -805,9 +797,19 @@ function Install-FsevenAgent {
         } elseif ($manifestEntry) {
             $msiUrl = [string](Get-JsonPath $script:ReleaseManifest 'agent.windows_x86_64.url')
             if (-not $msiSha256) { $msiSha256 = [string](Get-JsonPath $script:ReleaseManifest 'agent.windows_x86_64.sha256') }
-        } else {
-            $msiUrl = "https://github.com/f7-platform/public-agent-binaries/releases/latest/download/fseven-agent-$arch-windows.msi"
         }
+    }
+    # PAB18 (Audit Run 43): no release publishes an agent MSI, so there is no
+    # releases/latest URL to guess and no .sha256 sidecar to fall back on.
+    # Without a URL and a checksum from FSEVEN_AGENT_MSI_URL/_SHA256 or the
+    # release manifest, the agent is skipped with a warning.
+    if (-not $msiUrl) {
+        Write-Warn2 "The release manifest names no agent installer for windows_x86_64 — skipping agent install"
+        return
+    }
+    if (-not $msiSha256) {
+        Write-Warn2 "No SHA-256 checksum for the agent installer at $msiUrl — skipping agent install. Set FSEVEN_AGENT_MSI_SHA256 or use a release manifest that carries agent.windows_x86_64.sha256."
+        return
     }
     $msiTmp = Join-Path $env:TEMP "fseven-agent-$([guid]::NewGuid()).msi"
     Write-Step "Downloading agent installer: $msiUrl"
@@ -818,7 +820,6 @@ function Install-FsevenAgent {
         return
     }
     try {
-        if (-not $msiSha256) { $msiSha256 = Get-SidecarSha256 $msiUrl 'agent installer' }
         Assert-Sha256 $msiTmp $msiSha256 'agent installer'
         $sig = Get-AuthenticodeSignature -FilePath $msiTmp
         if ($sig.Status -ne 'Valid') {

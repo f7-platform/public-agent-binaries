@@ -6,6 +6,24 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 
 ## [Unreleased]
 
+### Removed
+
+- **(Audit Run 43, PAB18, f7-platform/fseven-atlas-mvp#7951) The installers no
+  longer guess an agent package or a checksum sidecar no release carries.**
+  When neither `FSEVEN_AGENT_PKG_URL` (`FSEVEN_AGENT_MSI_URL` on Windows) nor
+  the release manifest named an agent package, `install.sh` and `install.ps1`
+  fell back to a `releases/latest/download/fseven-agent-…` URL, and when no
+  checksum was given they fetched `<url>.sha256`. No release publishes either
+  asset, so on the opt-in agent path the guess downloaded nothing, and
+  `install.sh`'s sidecar lookup called `die` and exited 1 after the controller
+  was already up. Both installers now warn and skip the agent when the URL or
+  the checksum is missing; `fetch_sidecar_sha256`, `Get-SidecarSha256` and
+  `install.sh`'s unread `os` variable are gone. The canonical copies of both
+  installers live in fseven-controller, which still carries the fallback, so a
+  future sync from there would bring it back. `tests/bootstrap-handoff-static.sh`
+  asserts neither installer carries the Latest-release agent URL or a sidecar
+  fetch.
+
 ### Security
 
 - **(Audit Run 43, PAB4 / PAB5 / PAB6 / PAB7 / PAB8 / PAB15 / PAB17 / PAB19 /
