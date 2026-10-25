@@ -266,7 +266,7 @@ jobs:
             if (problems.length) {
               lines.push('This issue is not fully routed. Until every line below is fixed it stays in `status:triage` and no agent worklist or lane may take it.', '');
               for (const p of problems) lines.push(`- ${p}`);
-              lines.push('', 'Rules: `fseven-platform/.claude/ISSUE-LABELS.md`. Set the labels, or edit the form fields above, and the gate re-checks on save.');
+              lines.push('', 'Rules: `fseven-platform/.claude/ISSUE-LABELS.md`, in a private F7 repository that outside filers cannot open; the Priority, Complexity and Code owner dropdowns are all the form needs. Set the labels, or edit the form fields above, and the gate re-checks on save.');
             } else {
               lines.push('Routing labels are complete: one each of `type:`, `priority:`, `complexity:`, `scope:`, `status:`.');
             }
