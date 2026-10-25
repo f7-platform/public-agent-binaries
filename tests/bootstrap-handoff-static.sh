@@ -618,6 +618,34 @@ assert_not_contains \
   "$ROOT_DIR/README.md" \
   'Agent installers (4)' \
   '#59: README claim that every release tag produces four agent installers'
+
+# PAB18 (Audit Run 43): neither installer guesses an agent package through
+# releases/latest or fetches a `.sha256` sidecar on the agent path. No release
+# carries either, so the guess downloaded nothing and the sidecar lookup exited
+# the install after the controller was already up. A missing URL or checksum
+# now warns and skips the agent.
+for installer in install.sh install.ps1; do
+  assert_not_contains \
+    "$ROOT_DIR/$installer" \
+    'releases/latest/download/fseven-agent' \
+    "PAB18: $installer agent package guessed through the Latest release"
+done
+assert_not_contains \
+  "$ROOT_DIR/install.sh" \
+  '.sha256" "$tmp"' \
+  'PAB18: install.sh fetch of an agent .sha256 sidecar no release carries'
+assert_not_contains \
+  "$ROOT_DIR/install.sh" \
+  'fetch_sidecar_sha256' \
+  'PAB18: install.sh sidecar checksum helper'
+assert_not_contains \
+  "$ROOT_DIR/install.ps1" \
+  '$Url.sha256' \
+  'PAB18: install.ps1 fetch of an agent .sha256 sidecar no release carries'
+assert_not_contains \
+  "$ROOT_DIR/install.ps1" \
+  'Get-SidecarSha256' \
+  'PAB18: install.ps1 sidecar checksum helper'
 assert_not_contains \
   "$ROOT_DIR/install.sh" \
   'Install the agent on this machine too?' \
@@ -1751,7 +1779,7 @@ chmod +x "$pab19/bin/curl" "$pab19/bin/docker"
 {
   printf 'set -uo pipefail\n'
   printf 'log() { :; }\nwarn() { printf "warn: %%s\\n" "$*" >&2; }\ndie() { printf "die: %%s\\n" "$*" >&2; exit 1; }\n'
-  printf 'manifest_get() { :; }\ndownload_file() { return 1; }\nverify_sha256() { :; }\nverify_macos_pkg_signature() { :; }\nfetch_sidecar_sha256() { :; }\n'
+  printf 'manifest_get() { :; }\ndownload_file() { return 1; }\nverify_sha256() { :; }\nverify_macos_pkg_signature() { :; }\n'
   printf 'OS_NAME=Darwin\nCONTROLLER_PORT=8080\nADMIN_API_KEY=pab19-test-admin-key-0123456789abcdef\nMANIFEST_JSON=""\n'
   sh_function_body install_agent
   printf 'install_agent\n'

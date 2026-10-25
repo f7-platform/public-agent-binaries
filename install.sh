@@ -159,18 +159,6 @@ except Exception:
 PY
 }
 
-fetch_sidecar_sha256() {
-  local url="$1" label="$2" tmp checksum
-  tmp="$(mktemp)"
-  if download_file "${url}.sha256" "$tmp" 2>/dev/null; then
-    checksum="$(awk 'match($0, /[0-9A-Fa-f]{64}/) { print substr($0, RSTART, RLENGTH); exit }' "$tmp")"
-  fi
-  rm -f "$tmp"
-  if [[ -z "${checksum:-}" ]]; then
-    die "No SHA-256 checksum available for $label. Expected ${url}.sha256 or release-manifest checksum metadata."
-  fi
-  printf '%s' "$checksum"
-}
 
 # ── Secret-copy cleanup and abort (PB5, Audit Run 37; PAB4, Audit Run 43) ──
 # Two code paths below make a temporary full-plaintext copy of .env in the
@@ -648,9 +636,9 @@ fi
 # silent-install mechanism. No new controller or agent code.
 OS_NAME="$(uname -s)"
 install_agent() {
-  local os arch pkg_url pkg_sha256 installer_tmp token org_id
+  local arch pkg_url pkg_sha256 installer_tmp token org_id
   case "$OS_NAME" in
-    Darwin) os=macos ;;
+    Darwin) ;;
     *)      log "Skipping agent install (unsupported host: $OS_NAME)"; return 0 ;;
   esac
   case "$(uname -m)" in
@@ -734,8 +722,20 @@ install_agent() {
       pkg_sha256="$(manifest_get "agent.$key.sha256")"
     fi
   fi
+  # PAB18 (Audit Run 43): no release publishes an agent package, so there is
+  # no releases/latest URL to guess and no .sha256 sidecar to fall back on.
+  # Without a URL and a checksum from FSEVEN_AGENT_PKG_URL/_SHA256 or the
+  # release manifest, the controller is already up and the agent is skipped
+  # with a warning rather than failing the install.
   if [[ -z "$pkg_url" ]]; then
-    pkg_url="https://github.com/f7-platform/public-agent-binaries/releases/latest/download/fseven-agent-${arch}-apple.pkg"
+    warn "The release manifest names no agent package for macos_${arch} — skipping agent install.
+         Grab it manually from the dashboard's Connect an Agent view."
+    return 0
+  fi
+  if [[ -z "$pkg_sha256" ]]; then
+    warn "No SHA-256 checksum for the agent package at $pkg_url — skipping agent install.
+         Set FSEVEN_AGENT_PKG_SHA256 or use a release manifest that carries agent.macos_${arch}.sha256."
+    return 0
   fi
   log "Downloading agent installer: $pkg_url"
   installer_tmp="$(mktemp -d)/fseven-agent.pkg"
@@ -743,9 +743,6 @@ install_agent() {
     warn "Agent installer download failed — skipping agent install.
          Grab it manually from the dashboard's Connect an Agent view."
     return 0
-  fi
-  if [[ -z "$pkg_sha256" ]]; then
-    pkg_sha256="$(fetch_sidecar_sha256 "$pkg_url" "agent installer")"
   fi
   verify_sha256 "$installer_tmp" "$pkg_sha256" "agent installer"
   verify_macos_pkg_signature "$installer_tmp"
