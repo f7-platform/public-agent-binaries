@@ -24,7 +24,7 @@ welcome here.
    names, requires network); on Windows, `tests/install-ps1-acl-windows.ps1`
    covers the installer ACLs and `tests/install-ps1-windows-powershell-51.ps1`
    runs the installer on Windows PowerShell 5.1.
-4. **Open a pull request** — fill in the PR template; link the related issue.
+4. **Open a pull request** — describe the change and link the related issue.
 
 ## Code of conduct
 

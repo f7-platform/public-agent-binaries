@@ -245,7 +245,8 @@ function Add-SecretLines([string]$Path, [string]$Content) {
     # PB5: restrict BEFORE the append, not after. This used to be
     # AppendAllText-then-Protect-FilePath, which was safe only *by assumption* —
     # "the .env is already restricted". That assumption does not hold on the
-    # UPGRADE path (:372 CREDENTIAL_ENCRYPTION_KEY, :389 FSEVEN_APP_DB_PASSWORD),
+    # UPGRADE path (the Add-SecretLines backfills of CREDENTIAL_ENCRYPTION_KEY and
+    # of FSEVEN_APP_DB_PASSWORD),
     # which appends to a `.env` written by an OLDER installer — i.e. one created
     # before the PB5 fix, at the install directory's inherited ACL. Appending a
     # freshly-minted secret to a world-readable file and tightening it afterwards
@@ -326,7 +327,8 @@ function Add-PersistentJwtKey {
     # WriteAllBytes) — with the copy outside the try, such a throw left a partial or
     # complete plaintext copy of every secret in .env on disk with no cleanup at all,
     # which is the leak the `finally` exists to prevent. install.sh deliberately arms
-    # its trap BEFORE the `cp` for exactly this reason (install.sh :383-390); this is
+    # its trap BEFORE the `cp` for exactly this reason (install.sh's `pb4_backup_clean`
+    # trap block); this is
     # the PowerShell equivalent, and without it the claimed parity did not hold.
     try {
         # Restricted BEFORE the secrets land in it — see Copy-SecretFile. (`Copy-Item`
