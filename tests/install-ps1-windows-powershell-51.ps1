@@ -189,9 +189,17 @@ function Invoke-Installer {
     param(
         [string]$Name,
         [string[]]$ExtraArgs = @(),
-        [hashtable]$EnvOverrides = @{}
+        [hashtable]$EnvOverrides = @{},
+        [switch]$ViaIex
     )
-    $dir = Join-Path $Root $Name
+    $work = Join-Path $Root $Name
+    # README.md's own command is `irm <url> | iex`: the script arrives as a STRING
+    # decoded with the HTTP charset and is evaluated by Invoke-Expression, with no
+    # parameters, so -InstallDir takes its default of .\fseven. -ViaIex reproduces
+    # that path (Get-Content -Raw -Encoding UTF8 stands in for irm) from the
+    # scenario directory; the default runs the file the way a downloaded copy or the
+    # release asset is run, `powershell -File install.ps1`.
+    $dir = if ($ViaIex) { Join-Path $work 'fseven' } else { $work }
     New-Item -ItemType Directory -Path $dir -Force | Out-Null
     $target = Join-Path $dir 'docker-compose.yml'
     if (-not (Test-Path -LiteralPath $target)) { Copy-Item -LiteralPath $Compose -Destination $target }
@@ -215,8 +223,21 @@ function Invoke-Installer {
         Set-Item -Path "Env:$k" -Value $vars[$k]
     }
 
-    $argv = @('-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
-              '-File', $Installer, '-InstallDir', $dir, '-NoAgent') + $ExtraArgs
+    if ($ViaIex) {
+        $runner = Join-Path $Root 'iex-runner.ps1'
+        $runnerText = @(
+            'param([string]$Installer, [string]$Dir)'
+            'Set-Location -LiteralPath $Dir'
+            '$text = Get-Content -LiteralPath $Installer -Raw -Encoding UTF8'
+            'Invoke-Expression $text'
+        ) -join "`r`n"
+        [System.IO.File]::WriteAllText($runner, $runnerText + "`r`n", [System.Text.Encoding]::ASCII)
+        $argv = @('-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
+                  '-File', $runner, '-Installer', $Installer, '-Dir', $work) + $ExtraArgs
+    } else {
+        $argv = @('-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
+                  '-File', $Installer, '-InstallDir', $dir, '-NoAgent') + $ExtraArgs
+    }
     $quoted = $argv | ForEach-Object { if ($_ -match '\s') { '"' + $_ + '"' } else { $_ } }
     $proc = Start-Process -FilePath 'powershell.exe' -ArgumentList $quoted -Wait -PassThru -NoNewWindow `
         -RedirectStandardOutput $out -RedirectStandardError $err
@@ -225,7 +246,8 @@ function Invoke-Installer {
     $calls  = Read-TextFile $log
 
     Write-Host ""
-    Write-Host "== scenario '$Name': install.ps1 $($ExtraArgs -join ' ') exited $($proc.ExitCode) ==" -ForegroundColor Cyan
+    $how = if ($ViaIex) { 'via Invoke-Expression (the irm | iex path)' } else { 'via powershell -File' }
+    Write-Host "== scenario '$Name': install.ps1 $($ExtraArgs -join ' ') $how exited $($proc.ExitCode) ==" -ForegroundColor Cyan
     Write-Host "-- stdout --"
     Write-Host $stdout
     Write-Host "-- stderr --"
@@ -246,31 +268,38 @@ function Invoke-Installer {
 # The stale-volume probe runs only on a fresh install, and the stub answers it
 # the way the real CLI answers for a volume that does not exist: an Error line
 # on stderr and exit 1. Under 5.1 with the Stop preference that line is the
-# question PAB6 asks.
-$fresh = Invoke-Installer -Name 'fresh'
-if ($fresh.ExitCode -ne 0) {
-    Fail "a fresh install.ps1 exited $($fresh.ExitCode) under Windows PowerShell 5.1 against a docker whose only unusual act was writing 'Error: No such volume' to stderr at the stale-volume probe (PAB6). See the output above for where it stopped."
-}
-if ($fresh.Output -notmatch 'admin@example\.test') {
-    Fail "a fresh install.ps1 exited 0 but never printed the bootstrap admin email; it did not reach the credentials step"
-}
-if ($fresh.Calls -notmatch '(?m)^compose --profile community pull\s*$') {
-    Fail "a fresh install.ps1 never ran 'docker compose --profile community pull'"
-}
-if ($fresh.Calls -notmatch '(?m)^compose --profile community up -d\s*$') {
-    Fail "a fresh install.ps1 never ran 'docker compose --profile community up -d'"
-}
-$envFile = Join-Path $fresh.Dir '.env'
-foreach ($key in @('POSTGRES_PASSWORD', 'FSEVEN_APP_DB_PASSWORD', 'ADMIN_API_KEY',
-                   'CREDENTIAL_ENCRYPTION_KEY', 'CONTROLLER_JWT_PRIVATE_KEY', 'PORT', 'CONTROLLER_IMAGE')) {
-    if (-not (Select-String -Path $envFile -Pattern "^$key=" -Quiet)) {
-        Fail "a fresh install.ps1 did not write $key into .env"
+# question PAB6 asks. Run both ways a Windows operator reaches the script: the
+# README's `irm | iex` and a downloaded copy run from disk.
+function Assert-FreshInstall([hashtable]$Run, [string]$How) {
+    if ($Run.ExitCode -ne 0) {
+        Fail "a fresh install.ps1 ($How) exited $($Run.ExitCode) under Windows PowerShell 5.1 against a docker whose only unusual act was writing 'Error: No such volume' to stderr at the stale-volume probe (PAB6). See the output above for where it stopped."
     }
+    if ($Run.Output -notmatch 'admin@example\.test') {
+        Fail "a fresh install.ps1 ($How) exited 0 but never printed the bootstrap admin email; it did not reach the credentials step"
+    }
+    if ($Run.Calls -notmatch '(?m)^compose --profile community pull\s*$') {
+        Fail "a fresh install.ps1 ($How) never ran 'docker compose --profile community pull'"
+    }
+    if ($Run.Calls -notmatch '(?m)^compose --profile community up -d\s*$') {
+        Fail "a fresh install.ps1 ($How) never ran 'docker compose --profile community up -d'"
+    }
+    $envFile = Join-Path $Run.Dir '.env'
+    foreach ($key in @('POSTGRES_PASSWORD', 'FSEVEN_APP_DB_PASSWORD', 'ADMIN_API_KEY',
+                       'CREDENTIAL_ENCRYPTION_KEY', 'CONTROLLER_JWT_PRIVATE_KEY', 'PORT', 'CONTROLLER_IMAGE')) {
+        if (-not (Select-String -Path $envFile -Pattern "^$key=" -Quiet)) {
+            Fail "a fresh install.ps1 ($How) did not write $key into .env"
+        }
+    }
+    if (Test-Path (Join-Path $Run.Dir '.env.pb4.bak')) {
+        Fail ".env.pb4.bak survived the installer ($How): a full plaintext copy of every secret in .env, left on disk"
+    }
+    Pass "PAB6: a fresh install.ps1 ($How) completes under Windows PowerShell 5.1 when docker writes 'Error: No such volume' to stderr at the stale-volume probe"
 }
-if (Test-Path (Join-Path $fresh.Dir '.env.pb4.bak')) {
-    Fail ".env.pb4.bak survived the installer: a full plaintext copy of every secret in .env, left on disk"
-}
-Pass "PAB6: a fresh install.ps1 completes under Windows PowerShell 5.1 when docker writes 'Error: No such volume' to stderr at the stale-volume probe"
+
+$freshIex = Invoke-Installer -Name 'fresh-iex' -ViaIex
+$freshFile = Invoke-Installer -Name 'fresh-file'
+Assert-FreshInstall $freshIex 'irm | iex path'
+Assert-FreshInstall $freshFile 'run from disk'
 
 Remove-Item -LiteralPath $Root -Recurse -Force -ErrorAction SilentlyContinue
 Write-Host "`ninstall.ps1 Windows PowerShell 5.1 gate passed" -ForegroundColor Green
