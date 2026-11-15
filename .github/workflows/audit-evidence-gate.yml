@@ -45,7 +45,10 @@ permissions:
 jobs:
   enforce-close:
     if: github.event_name == 'issues' && contains(join(github.event.issue.labels.*.name, ','), 'audit:run-')
-    runs-on: ubuntu-latest
+    # LIGHT_RUNNER (fseven-atlas-mvp#7548): a short job, so it runs on the runners
+    # the repository variable LIGHT_RUNNER names; a repository without that
+    # variable (every one but fseven-atlas-mvp today) runs it on ubuntu-latest.
+    runs-on: ${{ vars.LIGHT_RUNNER || 'ubuntu-latest' }}
     env:
       # Actor provenance allowlist (INF1): logins trusted to satisfy the gate with
       # an audit-verifier APPROVED verdict even when their author_association is not
@@ -285,7 +288,10 @@ jobs:
 
   verifier-autoclose:
     if: github.event_name == 'issue_comment' && !github.event.issue.pull_request && contains(github.event.comment.body, '<!-- audit-verifier:verdict=APPROVED -->')
-    runs-on: ubuntu-latest
+    # LIGHT_RUNNER (fseven-atlas-mvp#7548): a short job, so it runs on the runners
+    # the repository variable LIGHT_RUNNER names; a repository without that
+    # variable (every one but fseven-atlas-mvp today) runs it on ubuntu-latest.
+    runs-on: ${{ vars.LIGHT_RUNNER || 'ubuntu-latest' }}
     env:
       # Actor provenance allowlist (INF1): logins trusted to post audit-verifier
       # verdicts even when their author_association is not a repo-write association.
