@@ -105,6 +105,13 @@ jobs:
   # runs install.ps1 on the 5.1 engine (`shell: powershell` is Windows PowerShell;
   # `pwsh` is PowerShell 7) against a stub docker.cmd that writes to stderr where
   # the real CLI does and never contacts a daemon.
+  #
+  # #69: README.md's Windows command is `irm <url> | iex`, for 5.1 and 7 alike. The
+  # script's fresh-iex scenario fetches install.ps1 with the real Invoke-RestMethod
+  # from a loopback listener that serves it as raw.githubusercontent.com does, so a
+  # byte-order mark reaches Invoke-Expression as it would for an operator. The
+  # second step runs the two fresh-install scenarios again with PowerShell 7 as the
+  # child engine; it shares this job's runner rather than adding a billed one.
   install-ps1-windows-powershell-51:
     if: github.event_name != 'schedule'
     runs-on: windows-latest
@@ -114,6 +121,10 @@ jobs:
       - name: install.ps1 under Windows PowerShell 5.1 against a stub docker (PAB5/PAB6)
         shell: powershell
         run: ./tests/install-ps1-windows-powershell-51.ps1
+
+      - name: install.ps1 through irm | iex and from disk under PowerShell 7 (#69)
+        shell: powershell
+        run: ./tests/install-ps1-windows-powershell-51.ps1 -Engine pwsh
 
   # #29 (Audit Run 37) — Published controller-image parity gate. The env-contract
   # gate above renders the compose in isolation; it never looks at the IMAGE the

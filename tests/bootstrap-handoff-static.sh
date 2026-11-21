@@ -188,7 +188,7 @@ assert_contains \
   'PowerShell existing .env port reuse'
 assert_contains \
   "$ROOT_DIR/install.ps1" \
-  'Windows ARM64 detected — using x86_64 MSI under emulation' \
+  'Windows ARM64 detected - using x86_64 MSI under emulation' \
   'PowerShell Windows ARM64 emulation warning'
 assert_not_contains \
   "$ROOT_DIR/install.ps1" \
@@ -793,12 +793,26 @@ if [[ "$(grep -c '& docker @Arguments 2>&1' "$ROOT_DIR/install.ps1")" -ne 1 ]]; 
   printf 'PAB5/PAB6: Invoke-Docker must be the one place install.ps1 invokes docker\n' >&2
   exit 1
 fi
-# PAB6, second defect found by the probe: Windows PowerShell 5.1 reads a file with
-# no byte-order mark as the ANSI code page, and the em dash / check-mark bytes then
-# decode to curly quotes that end strings early, so a BOM-less install.ps1 does not
-# parse at all when run from disk. The file must start with the UTF-8 BOM.
-if [[ "$(head -c 3 "$ROOT_DIR/install.ps1" | od -An -tx1 | tr -d ' \n')" != "efbbbf" ]]; then
-  printf 'PAB6: install.ps1 must start with the UTF-8 byte-order mark (EF BB BF) or Windows PowerShell 5.1 cannot parse it\n' >&2
+# PAB6 and #69: install.ps1 is pure ASCII and has no byte-order mark, because it
+# is run two ways and each rules out one of the encodings that would otherwise do.
+#  * No mark: README.md's Windows command is `irm <url> | iex`. Invoke-RestMethod
+#    keeps a UTF-8 byte-order mark as the character U+FEFF at the start of the text
+#    it returns, Invoke-Expression does not treat U+FEFF as whitespace, so the
+#    `param(...)` block is no longer first and the whole script fails to parse on
+#    Windows PowerShell 5.1 and PowerShell 7 before one statement runs (#69, which
+#    #65's mark caused).
+#  * ASCII only: `powershell -File install.ps1` under Windows PowerShell 5.1 reads
+#    a file with no mark in the machine's ANSI code page, so any byte of 0x80 or
+#    above is decoded as some other character; the em dash's bytes decoded to curly
+#    quotes that ended strings early and the file did not parse at all (PAB6).
+# This check runs on every pull request on Linux, so it is what keeps both out.
+if [[ "$(head -c 3 "$ROOT_DIR/install.ps1" | od -An -tx1 | tr -d ' \n')" == "efbbbf" ]]; then
+  printf 'PAB6/#69: install.ps1 starts with a UTF-8 byte-order mark (EF BB BF); irm | iex then receives U+FEFF and the script does not parse. Remove the mark and keep the file ASCII\n' >&2
+  exit 1
+fi
+pab6_non_ascii="$(LC_ALL=C grep -n -m 1 $'[\x80-\xff]' "$ROOT_DIR/install.ps1" || true)"
+if [[ -n "$pab6_non_ascii" ]]; then
+  printf 'PAB6/#69: install.ps1 has a byte of 0x80 or above, first at line %s; Windows PowerShell 5.1 reads a file with no byte-order mark in the ANSI code page, so the file must be ASCII:\n%s\n' "${pab6_non_ascii%%:*}" "$pab6_non_ascii" >&2
   exit 1
 fi
 assert_contains "$ROOT_DIR/.github/workflows/static-checks.yml" 'install-ps1-windows-powershell-51:' \

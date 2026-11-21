@@ -1,6 +1,6 @@
-﻿# install.ps1 — fseven-controller one-line installer for Windows
+# install.ps1 - fseven-controller one-line installer for Windows
 #
-# Per PROPOSAL-community-deployment §B3. Mirrors install.sh for
+# Per PROPOSAL-community-deployment section B3. Mirrors install.sh for
 # Windows Docker Desktop users.
 #
 # Usage (from PowerShell 5.1 or 7+):
@@ -20,8 +20,8 @@
 #                        this switch warns, then runs the agent step, which
 #                        needs FSEVEN_AGENT_MSI_URL and FSEVEN_AGENT_MSI_SHA256.
 #   -NoAgent            Skip the agent install (the default)
-#   -ProvisionEnvOnly   Write (or top up) the .env — including the persistent
-#                        Ed25519 JWT signing key — then exit WITHOUT touching
+#   -ProvisionEnvOnly   Write (or top up) the .env - including the persistent
+#                        Ed25519 JWT signing key - then exit WITHOUT touching
 #                        Docker. Use this to pre-provision an install directory
 #                        offline / in an air-gapped staging step. The installer
 #                        contract tests also use it to exercise the real .env
@@ -58,9 +58,9 @@ $ErrorActionPreference = 'Stop'
 $script:OnWindows = $true
 if (Test-Path Variable:\IsWindows) { $script:OnWindows = [bool](Get-Variable -Name IsWindows -ValueOnly) }
 
-function Write-Step($msg)  { Write-Host "▸ $msg" -ForegroundColor Cyan }
+function Write-Step($msg)  { Write-Host "> $msg" -ForegroundColor Cyan }
 function Write-Warn2($msg) { Write-Host "! $msg" -ForegroundColor Yellow }
-function Write-Fail($msg)  { Write-Host "✘ $msg" -ForegroundColor Red; exit 1 }
+function Write-Fail($msg)  { Write-Host "ERROR: $msg" -ForegroundColor Red; exit 1 }
 
 function Invoke-Docker {
     # Run the docker CLI as a native command and return what it wrote and how it
@@ -156,7 +156,7 @@ function Update-EnvLineFromFlag {
 
 function New-Secret {
     # 32 bytes of cryptographic entropy, hex-encoded (64 chars). Uses
-    # RNGCryptoServiceProvider via the BCL — available on both
+    # RNGCryptoServiceProvider via the BCL - available on both
     # Windows PowerShell 5.1 and PowerShell 7+ without extra modules.
     $bytes = New-Object byte[] 32
     [System.Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($bytes)
@@ -171,7 +171,7 @@ function New-Ed25519PrivateKeyPem {
     # Docker Desktop does not put one on PATH), and neither .NET Framework 4.x
     # (Windows PowerShell 5.1) nor .NET 8 exposes an Ed25519 API. So build the
     # PKCS#8 document directly: an Ed25519 private key is a FIXED 16-byte DER
-    # prefix followed by the 32-byte seed (RFC 8410 §7), and the seed is just
+    # prefix followed by the 32-byte seed (RFC 8410 section 7), and the seed is just
     # CSPRNG bytes:
     #
     #   30 2e            SEQUENCE (46 bytes)          -- OneAsymmetricKey
@@ -204,7 +204,7 @@ function New-Ed25519PrivateKeyPem {
 
 function Protect-FilePath([string]$Path) {
     # PB5 (Audit Run 34/37): restrict a file to the current user ONLY.
-    # Called on an EMPTY file BEFORE any secret is written into it — writing
+    # Called on an EMPTY file BEFORE any secret is written into it - writing
     # first and tightening afterwards leaves every secret in the file readable
     # by other local users for the window in between.
     if ($script:OnWindows) {
@@ -243,11 +243,11 @@ function Add-SecretLines([string]$Path, [string]$Content) {
     # Append secrets to .env, preserving LF endings.
     #
     # PB5: restrict BEFORE the append, not after. This used to be
-    # AppendAllText-then-Protect-FilePath, which was safe only *by assumption* —
+    # AppendAllText-then-Protect-FilePath, which was safe only *by assumption* -
     # "the .env is already restricted". That assumption does not hold on the
     # UPGRADE path (the Add-SecretLines backfills of CREDENTIAL_ENCRYPTION_KEY and
     # of FSEVEN_APP_DB_PASSWORD),
-    # which appends to a `.env` written by an OLDER installer — i.e. one created
+    # which appends to a `.env` written by an OLDER installer - i.e. one created
     # before the PB5 fix, at the install directory's inherited ACL. Appending a
     # freshly-minted secret to a world-readable file and tightening it afterwards
     # is the write-then-restrict TOCTOU PB5 names, re-created on the upgrade path.
@@ -266,18 +266,18 @@ function Copy-SecretFile([string]$Source, [string]$Destination) {
     # them.
     #
     # `Copy-Item` must NOT be used for this. The destination is a NEW file, and
-    # Windows gives a new file the INHERITABLE ACL of the CONTAINING DIRECTORY —
+    # Windows gives a new file the INHERITABLE ACL of the CONTAINING DIRECTORY -
     # it does not carry over the source file's explicit ACL. $InstallDir is created
     # with a plain `New-Item -ItemType Directory` (Step 1), so it inherits from its
     # parent, which normally grants read to other local principals. A `Copy-Item`
     # of .env therefore lands POSTGRES_PASSWORD, FSEVEN_APP_DB_PASSWORD,
-    # ADMIN_API_KEY, CREDENTIAL_ENCRYPTION_KEY — and the JWT PEM on a re-run — on
+    # ADMIN_API_KEY, CREDENTIAL_ENCRYPTION_KEY - and the JWT PEM on a re-run - on
     # disk readable by other local users for the whole window before Set-Acl runs.
     # That is the exact write-then-restrict TOCTOU that PB5 names, re-created on
     # the backup instead of on .env.
     #
     # So: create the destination EMPTY, restrict it, and only then stream the bytes
-    # in — the same restrict-before-write order as Write-SecretFile.
+    # in - the same restrict-before-write order as Write-SecretFile.
     #
     # Bytes, never text: this is a rollback copy of the operator's real .env, so it
     # must be byte-for-byte and must not go through an encoding round-trip
@@ -291,15 +291,15 @@ function Copy-SecretFile([string]$Source, [string]$Destination) {
 
 function Add-PersistentJwtKey {
     # PB4: provision CONTROLLER_JWT_PRIVATE_KEY into .env if (and only if) it is
-    # absent — an existing key is NEVER rotated, same contract as
+    # absent - an existing key is NEVER rotated, same contract as
     # POSTGRES_PASSWORD, because rotating it invalidates every outstanding agent
     # bearer token.
     #
     # Without this key the community controller falls back to a signing key it
     # generates itself. On images at or before v0.2.2 that fallback was
     # EPHEMERAL: every `docker compose restart` / host reboot minted a new one
-    # and invalidated every agent bearer token. Since v0.3.0 — which is what the
-    # published `:latest` serves — the controller persists the generated key to
+    # and invalidated every agent bearer token. Since v0.3.0 - which is what the
+    # published `:latest` serves - the controller persists the generated key to
     # `<model-storage>/bootstrap/jwt-signing.pem` and reloads it on later boots,
     # so tokens do survive a restart. Provisioning it here still matters: a key
     # in `.env` belongs to the operator and outlives the model-storage volume
@@ -316,7 +316,7 @@ function Add-PersistentJwtKey {
 
     $pem = New-Ed25519PrivateKeyPem
     if ($pem -notmatch 'BEGIN PRIVATE KEY') {
-        Write-Warn2 "Could not generate an Ed25519 key — skipping persistent JWT key (PB4)."
+        Write-Warn2 "Could not generate an Ed25519 key - skipping persistent JWT key (PB4)."
         return
     }
     $timestamp = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
@@ -324,14 +324,14 @@ function Add-PersistentJwtKey {
 
     # The `try` MUST open BEFORE the copy, not after it. Copy-SecretFile creates the
     # backup file and can throw part-way through (a Set-Acl failure, an IO error mid
-    # WriteAllBytes) — with the copy outside the try, such a throw left a partial or
+    # WriteAllBytes) - with the copy outside the try, such a throw left a partial or
     # complete plaintext copy of every secret in .env on disk with no cleanup at all,
     # which is the leak the `finally` exists to prevent. install.sh deliberately arms
     # its trap BEFORE the `cp` for exactly this reason (install.sh's `pb4_backup_clean`
     # trap block); this is
     # the PowerShell equivalent, and without it the claimed parity did not hold.
     try {
-        # Restricted BEFORE the secrets land in it — see Copy-SecretFile. (`Copy-Item`
+        # Restricted BEFORE the secrets land in it - see Copy-SecretFile. (`Copy-Item`
         # here is what re-created PB5 on Windows: it gave the backup the install
         # directory's inheritable ACL, so every secret in .env was other-user-readable
         # until the following Set-Acl.)
@@ -342,7 +342,7 @@ function Add-PersistentJwtKey {
         # exact form through `docker compose config` and diff the round-tripped PEM
         # against the original, so a parser regression is caught in CI).
         $block = "`n" +
-                 "# Added by install.ps1 on $timestamp — persistent Ed25519 JWT signing`n" +
+                 "# Added by install.ps1 on $timestamp - persistent Ed25519 JWT signing`n" +
                  "# key (Audit Run 37, PB4). Keep this value: rotating it invalidates every`n" +
                  "# outstanding agent bearer token and forces each agent to re-authenticate.`n" +
                  "CONTROLLER_JWT_PRIVATE_KEY=`"$pem`n`"`n"
@@ -364,7 +364,7 @@ function Add-PersistentJwtKey {
             Move-Item -Path $backup -Destination $EnvFile -Force
             Protect-FilePath $EnvFile
             Write-Warn2 @'
-This docker compose build could not render a multi-line PEM from .env —
+This docker compose build could not render a multi-line PEM from .env -
 leaving CONTROLLER_JWT_PRIVATE_KEY unset. The controller will generate its own
 signing key; on controller images <= v0.2.2 that key is ephemeral, so agent
 bearer tokens are invalidated on every restart (PB4).
@@ -373,7 +373,7 @@ bearer tokens are invalidated on every restart (PB4).
     } finally {
         # PB5: .env.pb4.bak is a FULL PLAINTEXT COPY of every secret in .env. If the
         # installer throws (or is Ctrl-C'd) anywhere in the window above, that copy
-        # would otherwise be left on disk permanently — long after the installer that
+        # would otherwise be left on disk permanently - long after the installer that
         # understood it was temporary has gone. Clear it on EVERY exit from this
         # function, including the early `return` and the error path. The rollback
         # branch moves it onto .env first, so this is a no-op once it has done its job.
@@ -424,8 +424,8 @@ function Assert-Sha256([string]$Path, [string]$Expected, [string]$Label) {
     Write-Step "Verified $Label SHA-256: $actual"
 }
 
-# ── Step 1. Preflight ────────────────────────────────────────────────
-Write-Step "fseven controller installer — checking prerequisites"
+# -- Step 1. Preflight ------------------------------------------------
+Write-Step "fseven controller installer - checking prerequisites"
 
 # -ProvisionEnvOnly writes .env and exits; it must work with no Docker and no
 # network (offline / air-gapped pre-provisioning), so the Docker preflight and
@@ -461,7 +461,7 @@ New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
 Set-Location $InstallDir
 Write-Step "Install directory: $InstallDir"
 
-# ── Step 1b. Resolve release manifest (PR-21 / §D2) ──────────────────
+# -- Step 1b. Resolve release manifest (PR-21 / section D2) ------------------
 $script:ReleaseManifest = $null
 if (-not $ProvisionEnvOnly) {
     $ManifestUrl = if ($env:FSEVEN_RELEASE_MANIFEST_URL) { $env:FSEVEN_RELEASE_MANIFEST_URL } `
@@ -484,11 +484,11 @@ if (-not $ProvisionEnvOnly) {
     }
 }
 
-# ── Step 2. .env handling (idempotent per §B6) ───────────────────────
+# -- Step 2. .env handling (idempotent per section B6) -----------------------
 $EnvFile = Join-Path $InstallDir '.env'
 $FreshInstall = $false
 if (Test-Path $EnvFile) {
-    Write-Step "Existing .env found — reusing all values (no secret rotation)"
+    Write-Step "Existing .env found - reusing all values (no secret rotation)"
     # Backfill CREDENTIAL_ENCRYPTION_KEY for installs that predate the
     # controller's encrypted-credential requirement (controller startup
     # rejects empty key outside dev). Mirrors install.sh behavior.
@@ -517,7 +517,7 @@ CREDENTIAL_ENCRYPTION_KEY=$CredentialEncryptionKey
     # serving-role cutover (Audit Run 35, CD10; synced to the published compose by
     # Audit Run 36, PB8). The updated compose binds the controller serving pool to
     # the least-privilege fseven_app role via DATABASE_URL=fseven_app:${FSEVEN_APP_DB_PASSWORD:?}
-    # — without this secret `docker compose up` fails closed. The controller
+    # - without this secret `docker compose up` fails closed. The controller
     # provisions + verifies the role from this password at startup, so generating a
     # fresh one here is safe. POSTGRES_PASSWORD is never regenerated. Mirrors install.sh.
     if ($existing -notmatch '(?m)^FSEVEN_APP_DB_PASSWORD=') {
@@ -538,7 +538,7 @@ FSEVEN_APP_DB_PASSWORD=$FsevenAppDbPassword
     # serving pool after the CD10 RLS serving-role cutover (Audit Run 35, CD10;
     # synced into the published compose by Audit Run 36, PB8). The compose binds
     # DATABASE_URL to fseven_app:${FSEVEN_APP_DB_PASSWORD:?}, so a missing value
-    # fails `docker compose up` closed — generate a strong one here.
+    # fails `docker compose up` closed - generate a strong one here.
     $FsevenAppDbPassword     = New-Secret
     $AdminApiKey             = New-Secret
     $CredentialEncryptionKey = New-Secret
@@ -551,7 +551,7 @@ FSEVEN_APP_DB_PASSWORD=$FsevenAppDbPassword
     # by other local users for the window in between.
     Write-SecretFile $EnvFile @"
 # Generated by install.ps1 on $timestamp
-# Do not commit this file. Back it up — POSTGRES_PASSWORD is required
+# Do not commit this file. Back it up - POSTGRES_PASSWORD is required
 # to decrypt the database and is never regenerated on re-run.
 POSTGRES_PASSWORD=$PostgresPassword
 FSEVEN_APP_DB_PASSWORD=$FsevenAppDbPassword
@@ -565,7 +565,7 @@ PORT=$Port
 }
 
 # -ProvisionEnvOnly: the .env (including the persistent JWT key) is the whole
-# job — do not touch Docker. Used for offline/air-gapped pre-provisioning, and
+# job - do not touch Docker. Used for offline/air-gapped pre-provisioning, and
 # by tests/bootstrap-handoff-static.sh to exercise this exact writer.
 if ($ProvisionEnvOnly) {
     Add-PersistentJwtKey -EnvFile $EnvFile
@@ -573,7 +573,7 @@ if ($ProvisionEnvOnly) {
     exit 0
 }
 
-# ── Step 3. Fetch the compose file ───────────────────────────────────
+# -- Step 3. Fetch the compose file -----------------------------------
 $ComposeFile = Join-Path $InstallDir 'docker-compose.yml'
 if (-not (Test-Path $ComposeFile)) {
     $manifestComposeUrl = Get-JsonPath $script:ReleaseManifest 'artifacts.docker_compose.url'
@@ -591,7 +591,7 @@ if (-not (Test-Path $ComposeFile)) {
     Assert-Sha256 $ComposeFile $ComposeSha256 'compose file'
 }
 
-# ── Step 3b. Stale-volume guard ──────────────────────────────────────
+# -- Step 3b. Stale-volume guard --------------------------------------
 # See install.sh for rationale: a named pgdata volume from a prior
 # install in a same-basename directory will rebind here with the old
 # password, poisoning every controller query.
@@ -610,18 +610,18 @@ if ($FreshInstall) {
                 if ($volRm.ExitCode -eq 0) {
                     Write-Step "Removed stale volume $StaleVol"
                 } else {
-                    throw "Failed to remove $StaleVol — close other docker compose projects using it, then re-run."
+                    throw "Failed to remove $StaleVol - close other docker compose projects using it, then re-run."
                 }
             } else {
                 throw "Cannot continue with stale volume + fresh .env. Re-run install.ps1 after:`n    docker volume rm $StaleVol"
             }
         } else {
-            throw "Non-interactive shell — cannot prompt for volume reset.`nRemove the stale volume explicitly, then re-run:`n    docker volume rm $StaleVol"
+            throw "Non-interactive shell - cannot prompt for volume reset.`nRemove the stale volume explicitly, then re-run:`n    docker volume rm $StaleVol"
         }
     }
 }
 
-# ── Step 3c. Persistent JWT signing key (PB4) ────────────────────────
+# -- Step 3c. Persistent JWT signing key (PB4) ------------------------
 # Parity with install.sh Step 3c. Runs for BOTH fresh installs and existing .env
 # files (the function is a no-op when the key is already present), so a Windows
 # install created before this change is topped up on the next run instead of
@@ -629,7 +629,7 @@ if ($FreshInstall) {
 # verifies the PEM renders through `docker compose config` before keeping it.
 Add-PersistentJwtKey -EnvFile $EnvFile -VerifyRender
 
-# ── Step 4. Pull + up ────────────────────────────────────────────────
+# -- Step 4. Pull + up ------------------------------------------------
 # PAB4: Compose prefers the shell environment over .env, so hand it the exact
 # values this run resolved (the flag when given, otherwise .env's), which are
 # also what the dashboard URL and the token-mint URL below use.
@@ -672,11 +672,11 @@ if ($up.ExitCode -ne 0) {
     Write-Fail "docker compose up exited $($up.ExitCode); the controller is not running. Check: docker compose --profile community logs"
 }
 
-# ── Step 5. Wait for bootstrap to finish ─────────────────────────────
+# -- Step 5. Wait for bootstrap to finish -----------------------------
 # Poll the persisted secrets file (written as the final bootstrap step)
-# rather than grepping logs — much more reliable on slow machines.
+# rather than grepping logs - much more reliable on slow machines.
 $BootstrapTimeoutSecs = if ($env:FSEVEN_BOOTSTRAP_TIMEOUT_SECS) { [int]$env:FSEVEN_BOOTSTRAP_TIMEOUT_SECS } else { 120 }
-Write-Step "Waiting for first-run bootstrap (up to $BootstrapTimeoutSecs s)…"
+Write-Step "Waiting for first-run bootstrap (up to $BootstrapTimeoutSecs s)..."
 $deadline = (Get-Date).AddSeconds($BootstrapTimeoutSecs)
 $SecretsPath = "/app/model-storage/bootstrap/secrets.env"
 $AdminEmail = $null
@@ -699,10 +699,10 @@ while ((Get-Date) -lt $deadline) {
     Start-Sleep -Seconds 2
 }
 
-# ── Step 6. Print URLs + credentials ─────────────────────────────────
+# -- Step 6. Print URLs + credentials ---------------------------------
 $DashboardUrl = "http://localhost:$Port"
 Write-Host ""
-Write-Host "✓ fseven controller is running at $DashboardUrl" -ForegroundColor Green
+Write-Host "OK: fseven controller is running at $DashboardUrl" -ForegroundColor Green
 Write-Host ""
 if ($BootstrapReady) {
     Write-Host "  Admin login" -ForegroundColor White
@@ -732,7 +732,7 @@ if ($BootstrapReady) {
     Write-ScrubGuidance $SecretsPath
 }
 
-# ── Step 7. Self-observer chaining (PR-19) ───────────────────────────
+# -- Step 7. Self-observer chaining (PR-19) ---------------------------
 # Offer to install the agent on this Windows host. Single-code-path:
 # uses the existing admin-token API + msiexec /quiet silent install.
 
@@ -742,10 +742,10 @@ function Install-FsevenAgent {
     $arch = switch ($env:PROCESSOR_ARCHITECTURE) {
         'AMD64' { 'x86_64' }
         'ARM64' {
-            Write-Warn2 "Windows ARM64 detected — using x86_64 MSI under emulation"
+            Write-Warn2 "Windows ARM64 detected - using x86_64 MSI under emulation"
             'x86_64'
         }
-        default { Write-Warn2 "Unsupported arch $($env:PROCESSOR_ARCHITECTURE) — skipping"; return }
+        default { Write-Warn2 "Unsupported arch $($env:PROCESSOR_ARCHITECTURE) - skipping"; return }
     }
 
     Write-Step "Fetching default-org id for enrollment-token minting"
@@ -755,16 +755,16 @@ function Install-FsevenAgent {
         $orgId = Invoke-ControllerPsql "SELECT org_id FROM orgs ORDER BY created_at ASC LIMIT 1"
     }
     if (-not $orgId) {
-        Write-Warn2 "Could not read default org id — skipping agent install."
+        Write-Warn2 "Could not read default org id - skipping agent install."
         return
     }
 
-    # Skip if a device with this hostname is already enrolled (§B6 item 5).
+    # Skip if a device with this hostname is already enrolled (section B6 item 5).
     $hostName = [System.Net.Dns]::GetHostName()
     $escaped  = $hostName.Replace("'", "''")
     $enrolled = Invoke-ControllerPsql "SELECT 1 FROM devices WHERE hostname = '$escaped' LIMIT 1"
     if ($enrolled) {
-        Write-Step "Device '$hostName' already enrolled — skipping agent install"
+        Write-Step "Device '$hostName' already enrolled - skipping agent install"
         return
     }
 
@@ -776,11 +776,11 @@ function Install-FsevenAgent {
             -Headers @{ 'X-Admin-Key' = $AdminApiKey } `
             -ContentType 'application/json' -Body $mintBody
     } catch {
-        Write-Warn2 "Token minting failed: $($_.Exception.Message) — skipping agent install"
+        Write-Warn2 "Token minting failed: $($_.Exception.Message) - skipping agent install"
         return
     }
     $token = $response.token
-    if (-not $token) { Write-Warn2 "Empty token response — skipping"; return }
+    if (-not $token) { Write-Warn2 "Empty token response - skipping"; return }
     $tokenHash = $response.token_hash
     # The hash is expected to be hex, but it is a value parsed out of an HTTP
     # response, so it is quote-doubled into the SQL literal exactly as
@@ -804,11 +804,11 @@ function Install-FsevenAgent {
     # Without a URL and a checksum from FSEVEN_AGENT_MSI_URL/_SHA256 or the
     # release manifest, the agent is skipped with a warning.
     if (-not $msiUrl) {
-        Write-Warn2 "The release manifest names no agent installer for windows_x86_64 — skipping agent install"
+        Write-Warn2 "The release manifest names no agent installer for windows_x86_64 - skipping agent install"
         return
     }
     if (-not $msiSha256) {
-        Write-Warn2 "No SHA-256 checksum for the agent installer at $msiUrl — skipping agent install. Set FSEVEN_AGENT_MSI_SHA256 or use a release manifest that carries agent.windows_x86_64.sha256."
+        Write-Warn2 "No SHA-256 checksum for the agent installer at $msiUrl - skipping agent install. Set FSEVEN_AGENT_MSI_SHA256 or use a release manifest that carries agent.windows_x86_64.sha256."
         return
     }
     $msiTmp = Join-Path $env:TEMP "fseven-agent-$([guid]::NewGuid()).msi"
@@ -827,7 +827,7 @@ function Install-FsevenAgent {
         }
         Write-Step "Verified Authenticode signature: $($sig.SignerCertificate.Subject)"
     } catch {
-        Write-Warn2 "Agent installer verification failed: $($_.Exception.Message) — skipping agent install"
+        Write-Warn2 "Agent installer verification failed: $($_.Exception.Message) - skipping agent install"
         Remove-Item $msiTmp -ErrorAction SilentlyContinue
         return
     }
@@ -847,7 +847,7 @@ function Install-FsevenAgent {
         return
     }
 
-    Write-Step "Waiting for agent to enroll (up to 60 s)…"
+    Write-Step "Waiting for agent to enroll (up to 60 s)..."
     $deadline = (Get-Date).AddSeconds(60)
     while ((Get-Date) -lt $deadline) {
         $seen = ""
@@ -858,7 +858,7 @@ function Install-FsevenAgent {
         }
         if ($seen) {
             Write-Host ""
-            Write-Host "✓ Agent enrolled: $hostName" -ForegroundColor Green
+            Write-Host "OK: Agent enrolled: $hostName" -ForegroundColor Green
             return
         }
         Start-Sleep -Seconds 2
@@ -880,6 +880,6 @@ if ($shouldInstall) {
     if ($envText -match 'ADMIN_API_KEY=(\S+)') {
         Install-FsevenAgent -AdminApiKey $Matches[1] -Port $Port
     } else {
-        Write-Warn2 "ADMIN_API_KEY not found in .env — cannot mint token"
+        Write-Warn2 "ADMIN_API_KEY not found in .env - cannot mint token"
     }
 }
