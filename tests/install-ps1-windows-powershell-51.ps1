@@ -27,7 +27,18 @@
 # Fails closed: not Windows PowerShell 5.x, or the stub not resolving ahead of a
 # real docker, is a failure, never a skip (the PB6 lesson: a check that silently
 # skips is not a check).
+#
+# -Engine pwsh (#69): README.md also promises PowerShell 7, and its command,
+# `irm <url> | iex`, is the one path whose text no other job tests. With -Engine
+# pwsh the harness still runs under 5.1 (it checks that below) but starts the
+# installer as a child pwsh.exe, runs only the two fresh-install scenarios (the
+# irm | iex path and the file run from disk) and stops; the scenarios after them
+# test 5.1's native-stderr behaviour, which PowerShell 7 does not have.
 # ─────────────────────────────────────────────────────────────────────────────
+param(
+    [ValidateSet('powershell', 'pwsh')]
+    [string]$Engine = 'powershell'
+)
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
@@ -49,6 +60,18 @@ It is running $edition $version. README.md advertises 5.1 and this is the only j
 that executes install.ps1 on that engine; running it anywhere else asserts nothing.
 "@
 }
+
+$ChildExe = "$Engine.exe"
+$childCommand = Get-Command $ChildExe -CommandType Application -ErrorAction SilentlyContinue
+if (-not $childCommand) { Fail "-Engine $Engine asks for $ChildExe and it is not on PATH" }
+# No quotes in the command: 5.1 drops embedded double quotes from a native argument.
+$childVersion = & $ChildExe -NoProfile -NonInteractive -Command '[string]$PSVersionTable.PSVersion + [char]32 + $PSVersionTable.PSEdition'
+if ($LASTEXITCODE -ne 0 -or -not $childVersion) { Fail "$ChildExe did not report its version" }
+$childVersion = ([string]$childVersion).Trim() -split ' '
+$EngineName = "PowerShell $($childVersion[0]) ($($childVersion[-1]))"
+$expectedEdition = if ($Engine -eq 'pwsh') { 'Core' } else { 'Desktop' }
+if ($childVersion[-1] -ne $expectedEdition) { Fail "$ChildExe reports $EngineName, not the $expectedEdition edition -Engine $Engine names" }
+Write-Host "install.ps1 runs as a child $ChildExe, $EngineName"
 
 $RepoRoot  = Split-Path -Parent $PSScriptRoot
 $Installer = Join-Path $RepoRoot 'install.ps1'
@@ -179,6 +202,66 @@ function Read-TextFile([string]$Path) {
     return ''
 }
 
+# -- The raw.githubusercontent.com stand-in (#69) ----------------------------
+# README.md's Windows command fetches install.ps1 with Invoke-RestMethod. To test
+# the text an operator receives, the -ViaIex scenario makes the child engine run
+# that same Invoke-RestMethod against this listener on the loopback address,
+# which answers one GET with the checkout's install.ps1 byte for byte and the
+# header raw.githubusercontent.com sends, `content-type: text/plain;
+# charset=utf-8`. A TcpListener rather than HttpListener, because HttpListener
+# needs a URL reservation that an unelevated runner may not have; port 0 lets the
+# system pick a free port.
+function Start-InstallerServer {
+    $listener = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopback, 0)
+    $listener.Start()
+    $port = ([System.Net.IPEndPoint]$listener.LocalEndpoint).Port
+    return @{ Listener = $listener; Url = "http://127.0.0.1:$port/install.ps1" }
+}
+
+function Complete-InstallerServe {
+    # Answer the child's one request, then stop listening. Returns what was served,
+    # or $null when the child exited or 60 s passed without a request, so a scenario
+    # can tell "iex failed on the text" from "the text never arrived".
+    param([hashtable]$Server, [System.Diagnostics.Process]$Process)
+    $listener = $Server.Listener
+    try {
+        $deadline = [DateTime]::UtcNow.AddSeconds(60)
+        while (-not $listener.Pending()) {
+            if ($Process.HasExited -or [DateTime]::UtcNow -gt $deadline) { return $null }
+            Start-Sleep -Milliseconds 50
+        }
+        $client = $listener.AcceptTcpClient()
+        try {
+            $stream = $client.GetStream()
+            $stream.ReadTimeout = 10000
+            $request = ''
+            $buffer = New-Object byte[] 4096
+            while ($request -notmatch "`r`n`r`n") {
+                $n = $stream.Read($buffer, 0, $buffer.Length)
+                if ($n -le 0) { break }
+                $request += [System.Text.Encoding]::ASCII.GetString($buffer, 0, $n)
+            }
+            $requestLine = ($request -split "`r`n")[0]
+            if ($requestLine -notmatch '^GET /install\.ps1 HTTP/1\.[01]$') {
+                $head = [System.Text.Encoding]::ASCII.GetBytes("HTTP/1.1 404 Not Found`r`nContent-Length: 0`r`nConnection: close`r`n`r`n")
+                $stream.Write($head, 0, $head.Length)
+                return "refused the unexpected request '$requestLine'"
+            }
+            $body = [System.IO.File]::ReadAllBytes($Installer)
+            $head = [System.Text.Encoding]::ASCII.GetBytes(
+                "HTTP/1.1 200 OK`r`nContent-Type: text/plain; charset=utf-8`r`nContent-Length: $($body.Length)`r`nConnection: close`r`n`r`n")
+            $stream.Write($head, 0, $head.Length)
+            $stream.Write($body, 0, $body.Length)
+            $stream.Flush()
+            return "served $($body.Length) bytes"
+        } finally {
+            $client.Close()
+        }
+    } finally {
+        $listener.Stop()
+    }
+}
+
 function Invoke-Installer {
     # Run the real install.ps1 under a child powershell.exe (the 5.1 engine), the
     # way tests/bootstrap-handoff-static.sh's run_install_ps1 does under pwsh: the
@@ -194,11 +277,16 @@ function Invoke-Installer {
     )
     $work = Join-Path $Root $Name
     # README.md's own command is `irm <url> | iex`: the script arrives as a STRING
-    # decoded with the HTTP charset and is evaluated by Invoke-Expression, with no
-    # parameters, so -InstallDir takes its default of .\fseven. -ViaIex reproduces
-    # that path (Get-Content -Raw -Encoding UTF8 stands in for irm) from the
-    # scenario directory; the default runs the file the way a downloaded copy or the
-    # release asset is run, `powershell -File install.ps1`.
+    # that Invoke-RestMethod decoded with the HTTP charset, and Invoke-Expression
+    # evaluates it with no parameters, so -InstallDir takes its default of .\fseven.
+    # -ViaIex runs that command itself, in the child engine, against
+    # Start-InstallerServer below, which serves the checkout's install.ps1 byte for
+    # byte with the content type raw.githubusercontent.com sends. The text iex
+    # parses is therefore what irm returns to an operator: a UTF-8 byte-order mark
+    # at the start of the file reaches iex as U+FEFF and fails the parse (#69), which
+    # the earlier stand-in, Get-Content -Raw -Encoding UTF8, hid by stripping it.
+    # The default runs the file the way a downloaded copy or the release asset is
+    # run, `powershell -File install.ps1`.
     $dir = if ($ViaIex) { Join-Path $work 'fseven' } else { $work }
     New-Item -ItemType Directory -Path $dir -Force | Out-Null
     $target = Join-Path $dir 'docker-compose.yml'
@@ -223,31 +311,40 @@ function Invoke-Installer {
         Set-Item -Path "Env:$k" -Value $vars[$k]
     }
 
+    $server = $null
     if ($ViaIex) {
+        $server = Start-InstallerServer
         $runner = Join-Path $Root 'iex-runner.ps1'
         $runnerText = @(
-            'param([string]$Installer, [string]$Dir)'
+            'param([string]$Url, [string]$Dir)'
+            '# Stop: a ParseException from iex is otherwise non-terminating here and the runner exits 0.'
+            '$ErrorActionPreference = ''Stop'''
             'Set-Location -LiteralPath $Dir'
-            '$text = Get-Content -LiteralPath $Installer -Raw -Encoding UTF8'
-            'Invoke-Expression $text'
+            'Invoke-RestMethod -Uri $Url | Invoke-Expression'
         ) -join "`r`n"
         [System.IO.File]::WriteAllText($runner, $runnerText + "`r`n", [System.Text.Encoding]::ASCII)
         $argv = @('-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
-                  '-File', $runner, '-Installer', $Installer, '-Dir', $work) + $ExtraArgs
+                  '-File', $runner, '-Url', $server.Url, '-Dir', $work) + $ExtraArgs
     } else {
         $argv = @('-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
                   '-File', $Installer, '-InstallDir', $dir, '-NoAgent') + $ExtraArgs
     }
     $quoted = $argv | ForEach-Object { if ($_ -match '\s') { '"' + $_ + '"' } else { $_ } }
-    $proc = Start-Process -FilePath 'powershell.exe' -ArgumentList $quoted -Wait -PassThru -NoNewWindow `
+    $proc = Start-Process -FilePath $ChildExe -ArgumentList $quoted -PassThru -NoNewWindow `
         -RedirectStandardOutput $out -RedirectStandardError $err
+    # Without -Wait, Process.ExitCode is only readable later if the handle was
+    # opened while the process ran.
+    $null = $proc.Handle
+    $served = $null
+    if ($server) { $served = Complete-InstallerServe -Server $server -Process $proc }
+    $proc.WaitForExit()
     $stdout = Read-TextFile $out
     $stderr = Read-TextFile $err
     $calls  = Read-TextFile $log
 
     Write-Host ""
-    $how = if ($ViaIex) { 'via Invoke-Expression (the irm | iex path)' } else { 'via powershell -File' }
-    Write-Host "== scenario '$Name': install.ps1 $($ExtraArgs -join ' ') $how exited $($proc.ExitCode) ==" -ForegroundColor Cyan
+    $how = if ($ViaIex) { "via irm | iex from $($server.Url) ($served)" } else { "via $ChildExe -File" }
+    Write-Host "== scenario '$Name' under $EngineName`: install.ps1 $($ExtraArgs -join ' ') $how exited $($proc.ExitCode) ==" -ForegroundColor Cyan
     Write-Host "-- stdout --"
     Write-Host $stdout
     Write-Host "-- stderr --"
@@ -261,6 +358,7 @@ function Invoke-Installer {
         Output   = $stdout + "`n" + $stderr
         Calls    = $calls
         Dir      = $dir
+        Served   = $served
     }
 }
 
@@ -273,11 +371,15 @@ function Invoke-Installer {
 function Describe-Stop([hashtable]$Run) {
     # Name the cause the stub log shows, so a red run says what happened rather
     # than blaming one suspect for every non-zero exit. The first probe run of
-    # this job did exactly that: install.ps1 never parsed under 5.1 (no BOM), no
-    # docker command ran, and the verdict still named the PAB6 stderr.
+    # this job did exactly that: install.ps1 never parsed under 5.1 (its non-ASCII
+    # characters, read in the ANSI code page, ended strings early), no docker
+    # command ran, and the verdict still named the PAB6 stderr.
+    if ($Run.ContainsKey('Served') -and $Run.Served -and $Run.Served -notmatch '^served ') {
+        return "the irm | iex child never received install.ps1: the stand-in listener $($Run.Served)"
+    }
     $calls = @(($Run.Calls -split "`r?`n") | Where-Object { $_.Trim() -ne '' })
     if ($calls.Count -eq 0) {
-        return "install.ps1 never called docker: it did not parse, or stopped before the preflight (read the stderr above; a ParserError there is the encoding defect, not PAB6)"
+        return "install.ps1 never called docker: it did not parse, or stopped before the preflight (read the stderr above; a ParserError there is an encoding defect, not PAB6: a byte-order mark on the irm | iex path (#69), a non-ASCII character when run from disk under 5.1)"
     }
     $last = $calls[-1].Trim()
     if ($last -match '^volume inspect ') {
@@ -290,8 +392,11 @@ function Describe-Stop([hashtable]$Run) {
 }
 
 function Assert-FreshInstall([hashtable]$Run, [string]$How) {
+    if ($How -match 'iex' -and -not ($Run.Served -match '^served ')) {
+        Fail "the irm | iex scenario under $EngineName never fetched install.ps1 from the stand-in listener ($($Run.Served)), so it tested nothing. $(Describe-Stop $Run)"
+    }
     if ($Run.ExitCode -ne 0) {
-        Fail "a fresh install.ps1 ($How) exited $($Run.ExitCode) under Windows PowerShell 5.1. $(Describe-Stop $Run)"
+        Fail "a fresh install.ps1 ($How) exited $($Run.ExitCode) under $EngineName. $(Describe-Stop $Run)"
     }
     if ($Run.Output -notmatch 'admin@example\.test') {
         Fail "a fresh install.ps1 ($How) exited 0 but never printed the bootstrap admin email; it did not reach the credentials step"
@@ -312,13 +417,20 @@ function Assert-FreshInstall([hashtable]$Run, [string]$How) {
     if (Test-Path (Join-Path $Run.Dir '.env.pb4.bak')) {
         Fail ".env.pb4.bak survived the installer ($How): a full plaintext copy of every secret in .env, left on disk"
     }
-    Pass "PAB6: a fresh install.ps1 ($How) completes under Windows PowerShell 5.1 when docker writes 'Error: No such volume' to stderr at the stale-volume probe"
+    Pass "PAB6: a fresh install.ps1 ($How) completes under $EngineName when docker writes 'Error: No such volume' to stderr at the stale-volume probe"
 }
 
 $freshIex = Invoke-Installer -Name 'fresh-iex' -ViaIex
 $freshFile = Invoke-Installer -Name 'fresh-file'
 Assert-FreshInstall $freshIex 'irm | iex path'
 Assert-FreshInstall $freshFile 'run from disk'
+
+if ($Engine -eq 'pwsh') {
+    # The scenarios below test Windows PowerShell 5.1's native-stderr behaviour.
+    Remove-Item -LiteralPath $Root -Recurse -Force -ErrorAction SilentlyContinue
+    Write-Host "`ninstall.ps1 fresh-install gate passed under $EngineName (irm | iex and run from disk)" -ForegroundColor Green
+    exit 0
+}
 
 # A fresh install whose bootstrap never completes: every poll of the secrets
 # file makes docker write "service controller is not running" to stderr, as the

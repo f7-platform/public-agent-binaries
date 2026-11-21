@@ -24,6 +24,30 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
   asserts neither installer carries the Latest-release agent URL or a sidecar
   fetch.
 
+### Fixed
+
+- **(#69) The README's Windows install command, `irm ... | iex`, parses again on
+  Windows PowerShell 5.1 and PowerShell 7.** The UTF-8 byte-order mark the
+  `PAB6` fix below added to `install.ps1` reached `Invoke-Expression` as the
+  character U+FEFF, because `Invoke-RestMethod` keeps it, so the
+  `[CmdletBinding()]` and `param(...)` block were no longer first and the script
+  failed with four parse errors before one statement ran. The mark is gone and
+  the file is now pure ASCII, which is what lets 5.1 still parse it from disk:
+  with no mark, 5.1 reads the file in the machine's ANSI code page, which is only
+  safe when every byte is ASCII. Em dashes, box-drawing rules, section signs and
+  ellipses in comments and messages became ASCII, and the installer's status
+  markers are now `>` for a step, `ERROR:` for a failure and `OK:` for success
+  (they were the glyphs U+25B8, U+2718 and U+2713). The Windows PowerShell 5.1
+  job's `irm | iex` scenario now fetches the file with the real
+  `Invoke-RestMethod` from a loopback listener that serves it as
+  raw.githubusercontent.com does, where it used to read it with `Get-Content`,
+  which strips a mark; a second step runs the same scenario under PowerShell 7.
+  `tests/bootstrap-handoff-static.sh` now fails when `install.ps1` starts with
+  the mark or holds any byte of 0x80 or above. The canonical copy of
+  `install.ps1` lives in fseven-controller, as the entry above says; if that copy
+  still carries the mark or the glyphs, a release sync would bring the defect
+  back, and this check is what fails on the pull request that does.
+
 ### Security
 
 - **(Audit Run 43, PAB4 / PAB5 / PAB6 / PAB7 / PAB8 / PAB15 / PAB17 / PAB19 /
